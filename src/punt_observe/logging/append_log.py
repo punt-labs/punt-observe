@@ -164,7 +164,7 @@ class AtomicAppendLog:
         inode across rotations. The ``fchmod`` re-tightens a pre-existing lock file
         left loose by an earlier, laxer run (best-effort, like the append fd).
         """
-        fd = os.open(self._lock_path, _LOCK_FLAGS, _LOCK_MODE)
+        fd = PrivateState(self._lock_path).open_private(_LOCK_FLAGS)
         with contextlib.suppress(OSError):
             os.fchmod(fd, _LOCK_MODE)
         return fd

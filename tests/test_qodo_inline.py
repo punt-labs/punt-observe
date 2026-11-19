@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import operator
+import os
+import stat
 import time
+from pathlib import Path
 from typing import Any, SupportsIndex, cast
+from unittest.mock import patch
 
 import pytest
 
+from punt_observe._private_fs import PrivatePaths
 from punt_observe.logging import LogRedactor
+from punt_observe.logging.append_log import AtomicAppendLog
 from punt_observe.telemetry import (
     CountAttr,
     IntAttr,
@@ -74,3 +80,59 @@ def test_many_near_limit_urls_keep_identical_output_quickly() -> None:
     started = time.monotonic()
     assert LogRedactor.settle(text) == expected
     assert time.monotonic() - started < 2
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_custom_directory_rejects_a_symlinked_ancestor_before_chmod(
+    tmp_path: Path,
+    existing: bool,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    child = target / "logs"
+    if existing:
+        child.mkdir(mode=0o755)
+        child.chmod(0o755)
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(OSError):
+        PrivatePaths.ensure_directory(link / "logs")
+    if existing:
+        assert stat.S_IMODE(child.stat().st_mode) == 0o755
+    else:
+        assert not child.exists()
+
+
+def test_private_open_rejects_a_symlinked_custom_parent(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "logs").mkdir()
+    leaf = target / "logs" / "out.log"
+    leaf.write_text("unchanged")
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(OSError):
+        fd = PrivatePaths(link / "logs" / "out.log").open_private(os.O_WRONLY)
+        os.close(fd)
+    assert leaf.read_text() == "unchanged"
+
+
+def test_append_cannot_redirect_through_a_custom_ancestor(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "logs").mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    AtomicAppendLog(link / "logs" / "out.log").append("must not be written")
+    assert list((target / "logs").iterdir()) == []
+
+
+def test_custom_paths_allow_a_resolved_trusted_temp_root(tmp_path: Path) -> None:
+    target = tmp_path / "trusted-temp"
+    target.mkdir()
+    alias = tmp_path / "system-temp-alias"
+    alias.symlink_to(target, target_is_directory=True)
+    with patch("punt_observe._private_fs.tempfile.gettempdir", return_value=str(alias)):
+        path = alias / "new" / "logs" / "out.log"
+        AtomicAppendLog(path).append("safe")
+    assert (target / "new" / "logs" / "out.log").read_text() == "safe\n"
