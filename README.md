@@ -1,2 +1,4 @@
 # punt-observe
-Shared Punt Labs logging and telemetry package: PII-safe rotating logs under ~/.punt-labs/&lt;tool> and OpenTelemetry usage metrics to a local SQLite store.
+
+Shared private diagnostics and privacy-safe local telemetry for Punt Labs Python tools.
+Python 3.13+, Linux and macOS. Licensed under MIT.
