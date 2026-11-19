@@ -70,7 +70,7 @@ class LogRedactor:
     _SCHEME_URL: ClassVar[re.Pattern[str]] = re.compile(
         r"(?<![A-Za-z0-9+.\-])(?P<scheme>[A-Za-z0-9+.\-]{1,2047})://"
         r"(?:[^\s/\\?#]*@)?(?P<host>[^\s/\\?#'\"<>@]*)"
-        r"(?P<path>[^\s?#\"<>]*)(?:[?#]\S*)?"
+        r"(?P<path>(?:[^\s?#'\"<>][^\s?#\"<>]*)?)(?:[?#]\S*)?"
     )
     _FORM: ClassVar[re.Pattern[str]] = re.compile(r"/…\(segments=\d+\)[).,;:\]}]*")
     # Scheme-less "user:password@": tried only where a run of user characters
@@ -240,7 +240,7 @@ class LogRedactor:
         after a bare host stays in the URL, where the host position is masked.
         """
         core, tail = cls._peel(url)
-        if core.endswith("'") and outside.endswith("'"):
+        while core.endswith("'"):
             core, tail = core[:-1], "'" + tail
         rest = core.partition("://")[2]
         if ":" in tail and not any(char in rest for char in "/?#"):
