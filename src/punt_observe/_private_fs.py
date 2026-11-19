@@ -97,5 +97,8 @@ class PrivatePaths:
         try:
             fd = self.open_private(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         except FileExistsError:
-            fd = self.open_private(os.O_WRONLY)
+            try:
+                fd = self.open_private(os.O_WRONLY)
+            except FileNotFoundError:
+                return
         os.close(fd)

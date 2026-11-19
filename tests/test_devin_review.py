@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import multiprocessing
 import os
 import sqlite3
 from multiprocessing.connection import Connection
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, use_span
 
 from punt_observe._private_fs import PrivatePaths
+from punt_observe.logging import configure_logging
 from punt_observe.logging.redactor import LogRedactor
 from punt_observe.telemetry import Telemetry, TelemetryConfig, open_telemetry
 from punt_observe.telemetry.sqlite_exporter import SQLiteStore
@@ -69,6 +72,43 @@ def test_fifo_is_rejected_without_blocking(tmp_path: Path) -> None:
     finally:
         parent.close()
         child.close()
+
+
+def test_configure_logging_tolerates_peer_rotation_between_secure_opens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / ".punt-labs/test/logs/test.log"
+    path.parent.mkdir(parents=True)
+    path.write_text("old\n")
+    backup = path.with_name(path.name + ".1")
+    original = PrivatePaths.open_private
+    raced = False
+
+    def rotate(self: PrivatePaths, flags: int) -> int:
+        nonlocal raced
+        try:
+            return original(self, flags)
+        except FileExistsError:
+            if not raced:
+                path.rename(backup)
+                raced = True
+            raise
+
+    root = logging.getLogger()
+    handlers, level, fallback = root.handlers[:], root.level, logging.lastResort
+    try:
+        with patch.object(PrivatePaths, "open_private", rotate):
+            assert configure_logging("test", "cli") == path
+        assert raced
+        assert backup.read_text() == "old\n"
+    finally:
+        for handler in root.handlers:
+            if handler not in handlers:
+                handler.close()
+        root.handlers, logging.lastResort = handlers, fallback
+        root.setLevel(level)
 
 
 def test_incremental_vacuum_reclaims_entire_freelist(tmp_path: Path) -> None:
