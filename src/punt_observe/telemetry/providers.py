@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import weakref
 from collections.abc import Callable
+from contextlib import ExitStack
 from typing import Any, cast
 
 from opentelemetry.sdk.metrics import (
@@ -38,6 +39,13 @@ from punt_observe.telemetry.sqlite_exporter import (
 type ExporterFactory = Callable[[str], tuple[SpanExporter, MetricExporter]]
 
 _PRUNE_INTERVAL_S = 3600.0
+
+
+def _cleanup_failed_setup(shutdown: Callable[[], None]) -> None:
+    try:
+        shutdown()
+    except BaseException:
+        warn("setup_cleanup_failed")
 
 
 class _PrivateResource(Resource):
@@ -93,55 +101,82 @@ class Providers:
         self.store: SQLiteStore | None = None
         self._pruner: PeriodicPruner | None = None
         self._pruning_stopped = False
-        resource_attrs: dict[str, str | int] = {"service.name": tool, "punt.schema": 1}
-        resource = _PrivateResource(resource_attrs)
-        selected: tuple[SpanExporter, MetricExporter] | None = None
-        if config.exporter == "otlp" and config.otlp_endpoint:
-            try:
+        with ExitStack() as cleanup:
+            resource_attrs: dict[str, str | int] = {
+                "service.name": tool,
+                "punt.schema": 1,
+            }
+            resource = _PrivateResource(resource_attrs)
+            selected: tuple[SpanExporter, MetricExporter] | None = None
+            if config.exporter == "otlp" and config.otlp_endpoint:
+                try:
+                    selected = (
+                        exporter_factory or config.exporter_factory or otlp.exporters
+                    )(config.otlp_endpoint)
+                except ImportError:
+                    warn("otlp_extra_missing")
+            if selected is None:
+                self.store = SQLiteStore(
+                    PrivatePaths.root(tool) / "telemetry.db",
+                    config.retention_days,
+                    resource_attrs,
+                )
+                cleanup.callback(_cleanup_failed_setup, self.store.close)
                 selected = (
-                    exporter_factory or config.exporter_factory or otlp.exporters
-                )(config.otlp_endpoint)
-            except ImportError:
-                warn("otlp_extra_missing")
-        if selected is None:
-            self.store = SQLiteStore(
-                PrivatePaths.root(tool) / "telemetry.db",
-                config.retention_days,
-                resource_attrs,
+                    SQLiteSpanExporter(self.store),
+                    SQLiteMetricExporter(self.store),
+                )
+            span_cleanup = cleanup.enter_context(ExitStack())
+            span_cleanup.callback(_cleanup_failed_setup, selected[0].shutdown)
+            metric_cleanup = cleanup.enter_context(ExitStack())
+            metric_cleanup.callback(
+                _cleanup_failed_setup, cast(Any, selected[1]).shutdown
             )
-            selected = SQLiteSpanExporter(self.store), SQLiteMetricExporter(self.store)
-        self.traces = TracerProvider(resource=resource, shutdown_on_exit=False)
-        self.processor = BatchSpanProcessor(
-            selected[0],
-            max_queue_size=2048,
-            max_export_batch_size=512,
-            schedule_delay_millis=1000,
-            export_timeout_millis=2000,
-        )
-        self.traces.add_span_processor(self.processor)
-        self.reader = PeriodicExportingMetricReader(
-            _DeltaMetricExporter(selected[1]),
-            export_interval_millis=60_000,
-            export_timeout_millis=2000,
-        )
-        self.metrics = MeterProvider(
-            resource=resource,
-            metric_readers=[self.reader],
-            shutdown_on_exit=False,
-            exemplar_filter=AlwaysOffExemplarFilter(),
-        )
-        self.tracer = self.traces.get_tracer("punt_observe", "1")
-        self.meter = self.metrics.get_meter("punt_observe", "1")
-        if self.store is not None:
-            self._pruner = PeriodicPruner(self.store, _PRUNE_INTERVAL_S)
-            reference = weakref.ref(self)
+            self.traces = TracerProvider(resource=resource, shutdown_on_exit=False)
+            self.processor = BatchSpanProcessor(
+                selected[0],
+                max_queue_size=2048,
+                max_export_batch_size=512,
+                schedule_delay_millis=1000,
+                export_timeout_millis=2000,
+            )
+            span_cleanup.pop_all()
+            span_cleanup.callback(_cleanup_failed_setup, self.processor.shutdown)
+            self.traces.add_span_processor(self.processor)
+            span_cleanup.pop_all()
+            span_cleanup.callback(_cleanup_failed_setup, self.traces.shutdown)
+            self.reader = PeriodicExportingMetricReader(
+                _DeltaMetricExporter(selected[1]),
+                export_interval_millis=60_000,
+                export_timeout_millis=2000,
+            )
+            metric_cleanup.pop_all()
+            metric_cleanup.callback(
+                _cleanup_failed_setup, cast(Any, self.reader).shutdown
+            )
+            self.metrics = MeterProvider(
+                resource=resource,
+                metric_readers=[self.reader],
+                shutdown_on_exit=False,
+                exemplar_filter=AlwaysOffExemplarFilter(),
+            )
+            metric_cleanup.pop_all()
+            metric_cleanup.callback(_cleanup_failed_setup, self.metrics.shutdown)
+            self.tracer = self.traces.get_tracer("punt_observe", "1")
+            self.meter = self.metrics.get_meter("punt_observe", "1")
+            if self.store is not None:
+                self._pruner = PeriodicPruner(self.store, _PRUNE_INTERVAL_S)
+                cleanup.callback(_cleanup_failed_setup, self._pruner.join)
+                cleanup.callback(self.stop_pruning)
+                reference = weakref.ref(self)
 
-            def after_fork() -> None:
-                bundle = reference()
-                if bundle is not None:
-                    bundle._restart_pruning()
+                def after_fork() -> None:
+                    bundle = reference()
+                    if bundle is not None:
+                        bundle._restart_pruning()
 
-            os.register_at_fork(after_in_child=after_fork)
+                os.register_at_fork(after_in_child=after_fork)
+            cleanup.pop_all()
 
     def _restart_pruning(self) -> None:
         self._pruner = None

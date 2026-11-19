@@ -9,13 +9,18 @@ import sqlite3
 import threading
 import time
 import weakref
+from collections.abc import Callable
 from multiprocessing.connection import Connection
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
-from opentelemetry.sdk.metrics.export import MetricExporter
+from opentelemetry.sdk.metrics.export import (
+    MetricExporter,
+    PeriodicExportingMetricReader,
+)
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from punt_observe.telemetry import (
@@ -277,3 +282,61 @@ def test_invalid_pruning_interval_starts_no_worker(interval: float) -> None:
     with pytest.raises(ValueError):
         PeriodicPruner(None, interval)  # type: ignore[arg-type]
     assert pruning_threads() <= before
+
+
+def _record_created[T](
+    factory: Callable[..., T], instances: list[T]
+) -> Callable[..., T]:
+    def create(*args: Any, **kwargs: Any) -> T:
+        instance = factory(*args, **kwargs)
+        instances.append(instance)
+        return instance
+
+    return create
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "BatchSpanProcessor",
+        "PeriodicExportingMetricReader",
+        "MeterProvider",
+        "PeriodicPruner",
+    ],
+)
+def test_failed_provider_setup_closes_store_and_started_workers(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    stores: list[SQLiteStore] = []
+    processors: list[BatchSpanProcessor] = []
+    readers: list[PeriodicExportingMetricReader] = []
+    for name, factory in (
+        ("SQLiteStore", _record_created(SQLiteStore, stores)),
+        ("BatchSpanProcessor", _record_created(BatchSpanProcessor, processors)),
+        (
+            "PeriodicExportingMetricReader",
+            _record_created(PeriodicExportingMetricReader, readers),
+        ),
+    ):
+        monkeypatch.setattr(providers, name, factory)
+    monkeypatch.setattr(
+        providers, failure, Mock(side_effect=RuntimeError("setup failed"))
+    )
+    before = set(threading.enumerate())
+    try:
+        with pytest.raises(RuntimeError, match="setup failed"):
+            providers.Providers("test", TelemetryConfig())
+        assert len(stores) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            cast(Any, stores[0])._conn.execute("SELECT 1")
+        workers = set(threading.enumerate()) - before
+        for worker in workers:
+            worker.join(0.2)
+        assert not any(worker.is_alive() for worker in workers)
+    finally:
+        for processor in processors:
+            cast(Any, processor).shutdown()
+        for reader in readers:
+            cast(Any, reader).shutdown()
+        for store in stores:
+            store.close()
