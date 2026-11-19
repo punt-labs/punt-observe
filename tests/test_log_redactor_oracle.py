@@ -11,8 +11,10 @@ The profile is derandomized: the same examples run in CI every time.
 
 from __future__ import annotations
 
+# pyright: reportPrivateUsage=false
 import pytest
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from punt_observe.logging.redactor import LogRedactor
 from tests.redaction import redacted

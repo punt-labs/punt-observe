@@ -1,6 +1,7 @@
 """Port the quarry log_form.py reference (MIT, Punt Labs).
 
-The one shape a URL takes in a log: host and port, never any of the path."""
+The one shape a URL takes in a log: host and port, never any of the path.
+"""
 
 from __future__ import annotations
 

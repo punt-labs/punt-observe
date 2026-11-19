@@ -35,9 +35,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Self, TypedDict, final
 
-from punt_observe.logging.sanitize import SANITIZER
 from punt_observe._private_fs import PrivatePaths as PrivateState
-
+from punt_observe.logging.sanitize import SANITIZER
 
 __all__ = ["AtomicAppendLog", "SinkHealth"]
 

@@ -1,6 +1,7 @@
 """Port the quarry authority_mask.py reference (MIT, Punt Labs).
 
-Mask the userinfo of every ``scheme://`` authority in a finished log record."""
+Mask the userinfo of every ``scheme://`` authority in a finished log record.
+"""
 
 from __future__ import annotations
 

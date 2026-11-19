@@ -1,6 +1,7 @@
 """Port the quarry log_redactor.py reference (MIT, Punt Labs).
 
-Mask the URL secrets and control characters in a finished log line."""
+Mask the URL secrets and control characters in a finished log line.
+"""
 
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ class LogRedactor:
 
     The contract, in the order it is applied:
 
-    1. The record is cut at :attr:`MAX_RECORD` bytes of text, with a visible marker.
+    1. Input is prebounded at :attr:`MAX_RECORD` characters, with a visible marker.
     2. Control characters are escaped (``\x1b``), so every later step reads the
        text that is written.  Newlines are kept; :meth:`one_line` escapes them.
     3. The userinfo of every ``scheme://`` authority is masked as
@@ -39,7 +40,8 @@ class LogRedactor:
     read differently to the next), so redacting a record twice gives the record
     redacted once.  After :attr:`PASSES` passes without a fixed point the record is
     withheld: :meth:`settle` says so with ``None``, for a caller that has the
-    record and can say what was withheld.  Redaction never logs.
+    record and can say what was withheld. Final UTF-8 output, including the marker,
+    is capped at :attr:`MAX_RECORD` bytes. Redaction never logs.
 
     A line with no control character, no ``scheme://``, no
     ``user:password@``, no ``?query`` and no token over :attr:`MAX_TOKEN` comes back
@@ -102,18 +104,27 @@ class LogRedactor:
         for _ in range(cls.PASSES):
             masked = cls._once(text)
             if masked == text:
-                return text + marker
+                return cls._finish(text, marker)
             text = masked
         # No fixed point: what is left may still hold what a pass would mask.
         return None
 
     @classmethod
     def _bounded(cls, text: str) -> tuple[str, str]:
-        """Return *text* cut to :attr:`MAX_RECORD`, and the marker saying so."""
+        """Prebound work, retaining quarry's separate truncation marker."""
         if len(text) <= cls.MAX_RECORD:
             return text, ""
-        dropped = len(text[cls.MAX_RECORD :].encode("utf-8", errors="replace"))
+        dropped = len(text[cls.MAX_RECORD :].encode("utf-8", errors="backslashreplace"))
         return text[: cls.MAX_RECORD], f" […truncated {dropped} bytes]"
+
+    @classmethod
+    def _finish(cls, text: str, marker: str) -> str:
+        """Apply the final byte cap after redaction, keeping its marker intact."""
+        raw = text.encode("utf-8", errors="backslashreplace")
+        if len(raw) + len(marker.encode()) > cls.MAX_RECORD:
+            marker = marker or " [truncated]"
+            raw = raw[: cls.MAX_RECORD - len(marker.encode())]
+        return raw.decode("utf-8", errors="ignore") + marker
 
     @classmethod
     def _once(cls, text: str) -> str:
@@ -236,7 +247,7 @@ class LogRedactor:
             closer: outside.count(opener) - outside.count(closer)
             for closer, opener in cls._OPENERS.items()
         }
-        kept = []
+        kept: list[str] = []
         for char in tail:
             if open_count.get(char, 0) > 0:
                 open_count[char] -= 1

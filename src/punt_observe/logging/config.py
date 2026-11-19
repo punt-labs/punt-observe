@@ -13,7 +13,7 @@ from typing import Any
 from punt_observe._private_fs import PrivatePaths
 from punt_observe.logging.append_log import AtomicAppendLog
 from punt_observe.logging.formatter import RedactingFormatter
-from punt_observe.logging.handler import PrivateFileHandler
+from punt_observe.logging.handler import PrivateFileHandler, RedactingStreamHandler
 
 
 class Role(StrEnum):
@@ -63,7 +63,7 @@ def configure_logging(
     }
     if sys.stderr is not None:
         handlers["stderr"] = {
-            "class": "logging.StreamHandler",
+            "()": RedactingStreamHandler,
             "stream": "ext://sys.stderr",
             "level": stderr_level,
             "formatter": "standard",

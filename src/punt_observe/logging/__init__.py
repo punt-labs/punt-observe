@@ -6,6 +6,10 @@ from punt_observe.logging.redactor import LogRedactor
 from punt_observe.logging.sanitize import escape
 
 __all__ = [
-    "AtomicAppendLog", "LoggingSetupError", "Role", "configure_logging",
-    "LogRedactor", "escape",
+    "AtomicAppendLog",
+    "LoggingSetupError",
+    "Role",
+    "configure_logging",
+    "LogRedactor",
+    "escape",
 ]

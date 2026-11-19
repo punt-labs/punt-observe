@@ -3,10 +3,28 @@
 from __future__ import annotations
 
 import logging
+import sys
+from contextlib import suppress
 from pathlib import Path
+from typing import TextIO
 
 from punt_observe.logging.append_log import AtomicAppendLog
 from punt_observe.logging.formatter import bounded
+from punt_observe.logging.sanitize import escape
+
+
+def _report_failure() -> None:
+    with suppress(Exception):
+        if sys.__stderr__ is not None:
+            sys.__stderr__.write("punt-observe: record withheld: logging failure\n")
+
+
+class RedactingStreamHandler(logging.StreamHandler[TextIO]):
+    """Keep raw records out of Python's default stream failure report."""
+
+    def handleError(self, record: logging.LogRecord) -> None:  # noqa: N802
+        """Report fixed metadata only, never original arguments or exceptions."""
+        _report_failure()
 
 
 class PrivateFileHandler(logging.Handler):
@@ -25,8 +43,6 @@ class PrivateFileHandler(logging.Handler):
         try:
             from_text = self.format(record)
             # Escape first: the expansion must count against the byte budget.
-            from punt_observe.logging.sanitize import escape
-
             self.sink.append(bounded(escape(from_text)))
         except Exception:
-            AtomicAppendLog._to_stderr("record withheld: logging failure")
+            _report_failure()

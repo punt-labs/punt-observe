@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 
 from punt_observe.logging.redactor import LogRedactor
 
@@ -41,4 +42,16 @@ class RedactingFormatter(logging.Formatter):
                 return bounded(settled)
         except Exception:
             pass
-        return "[record withheld: redaction did not settle]"
+        name = (
+            record.name
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,255}", record.name)
+            else "unknown"
+        )
+        level = {
+            logging.DEBUG: "DEBUG",
+            logging.INFO: "INFO",
+            logging.WARNING: "WARNING",
+            logging.ERROR: "ERROR",
+            logging.CRITICAL: "CRITICAL",
+        }.get(record.levelno, "UNKNOWN")
+        return f"[{level}] {name}: [record withheld: redaction did not settle]"
