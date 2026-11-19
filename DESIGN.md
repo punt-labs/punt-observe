@@ -61,7 +61,10 @@ No signal handlers are installed. Default-disposition SIGTERM (including a serve
 restoring and re-raising it), SIGKILL and os._exit bypass atexit. Daemons must
 translate SIGTERM into normal Python unwinding or explicitly shut down before
 re-raising the signal; atexit alone cannot make abrupt termination durable.
-Shutdown cancels scheduled pruning immediately. In-flight maintenance is joined
+Shutdown defers lock-taking cleanup to its daemon worker so a signal handler
+cannot synchronously re-enter a lock held by the interrupted thread. Diagnostic
+rate limiting uses a reentrant lock for the thread-start failure fallback.
+The shutdown worker cancels scheduled pruning before flushing. In-flight maintenance is joined
 by the bounded facade's shutdown worker before closing the shared store; a stuck
 maintenance pass may finish later on its daemon, without extending caller waits.
 OTLP is lazily imported and requires config consent; missing extra falls back local.

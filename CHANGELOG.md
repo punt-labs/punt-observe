@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Defer shutdown's registry and pruning locks to its bounded worker and make
+  diagnostic rate limiting reentrant, avoiding signal-handler shutdown deadlocks.
 - Publish exit work before starting its worker and reject activation after exit
   begins, preventing missed flushes and stranded exit workers during registration.
 - Force-flush metrics and queued spans/events at shutdown; flush pending providers

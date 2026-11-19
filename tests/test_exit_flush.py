@@ -210,6 +210,67 @@ def main():
 main()
 """
 
+REENTRANT = r"""
+import sys
+sys.path.append(sys.argv[2])
+import os, signal, threading, time
+from punt_observe.telemetry import (
+    SignalSchema, open_telemetry, providers, _fork, _exit, _diagnostics,
+)
+t = open_telemetry("exit", [SignalSchema("exit.cli.count", 1, "counter")])
+bundle = t._providers
+mode = sys.argv[1]
+signal.signal(signal.SIGTERM, lambda *args: t.shutdown(timeout_s=0.02))
+if mode == "activate":
+    original = providers.ExitFlush
+    def activate(callback):
+        os.kill(os.getpid(), signal.SIGTERM)
+        return original(callback)
+    providers.ExitFlush = activate
+    t.count("exit.cli.count", 1)
+else:
+    t.count("exit.cli.count", 1)
+    lock = {"fork": _fork._lock, "exit": _exit._lock,
+            "store": bundle.store._lock, "diagnostics": _diagnostics._lock}[mode]
+    original = threading.Thread.start
+    if mode == "diagnostics":
+        def fail(self):
+            raise RuntimeError("worker unavailable")
+        threading.Thread.start = fail
+    try:
+        with lock:
+            os.kill(os.getpid(), signal.SIGTERM)
+    finally:
+        threading.Thread.start = original
+if mode != "diagnostics":
+    deadline = time.monotonic() + 2
+    while any(x.name.startswith("punt-observe-") for x in threading.enumerate()):
+        assert time.monotonic() < deadline, "shutdown left a waiting worker"
+        time.sleep(0.01)
+print("reentrant shutdown completed")
+"""
+
+
+@pytest.mark.parametrize("mode", ["activate", "fork", "exit", "store", "diagnostics"])
+def test_signal_shutdown_does_not_reenter_held_locks(
+    installed_python: Path,
+    tmp_path: Path,
+    executions: list[subprocess.Popen[str]],
+    mode: str,
+) -> None:
+    process = subprocess.Popen(
+        [str(installed_python), "-c", REENTRANT, mode, sysconfig.get_path("purelib")],
+        cwd=tmp_path,
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    executions.append(process)
+    stdout, stderr = process.communicate(timeout=4)
+    assert process.returncode == 0, stderr
+    assert "reentrant shutdown completed" in stdout
+
 
 @pytest.fixture(scope="module")
 def installed_python(tmp_path_factory: pytest.TempPathFactory) -> Path:

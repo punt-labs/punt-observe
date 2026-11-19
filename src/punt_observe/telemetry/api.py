@@ -217,14 +217,13 @@ class Telemetry:
         if self._stopped:
             return
         self._stopped = True
-        unregister(self)
         if self._providers is None:
             return
         providers = self._providers
-        providers.stop_pruning()
 
         def finish() -> None:
             try:
+                unregister(self)
                 providers.shutdown(timeout_s=timeout_s)
             except Exception:
                 warn("shutdown_failed")
