@@ -9,6 +9,7 @@ from weakref import WeakSet
 
 from punt_observe.telemetry._diagnostics import reset_after_fork as reset_diagnostics
 from punt_observe.telemetry._diagnostics import warn
+from punt_observe.telemetry._exit import reset_after_fork as reset_exit
 
 
 class _ForkAware(Protocol):
@@ -35,6 +36,7 @@ def _after_fork() -> None:
     global _lock
     _lock = threading.Lock()
     reset_diagnostics()
+    reset_exit()
     for instance in tuple(_instances):
         try:
             instance.reset_after_fork()

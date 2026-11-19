@@ -78,6 +78,7 @@ class Telemetry:
                 warn(validated)
                 return None
             validated["punt.schema_version"] = version
+            self._providers.activate()
             return validated
         except Exception:
             warn("validation_failed")
@@ -224,7 +225,7 @@ class Telemetry:
 
         def finish() -> None:
             try:
-                providers.shutdown()
+                providers.shutdown(timeout_s=timeout_s)
             except Exception:
                 warn("shutdown_failed")
 
