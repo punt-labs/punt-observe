@@ -12,6 +12,10 @@ environments and a fresh HOME for every case. Override `SMOKE_VENV` and
 `SMOKE_OUTPUT` to change these locations. Start with a nonexistent venv for a
 fully fresh installation; an existing smoke venv is deliberately preserved.
 
+Pass `SMOKE_WHEEL=/absolute/path/to/release.whl` to test an already-built wheel
+without rebuilding. The tag release workflow uses this to gate the exact artifact
+uploaded by its build job before trusted publishing to TestPyPI and PyPI.
+
 The CLI declares a span, event, counter and histogram, then tests normal emission,
 invalid/free-text rejection, all three off switches, real forked children, and
 idle expiry/vacuum. Five concurrency rounds each launch eight **subprocesses**;

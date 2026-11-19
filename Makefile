@@ -2,6 +2,7 @@
 
 SMOKE_VENV ?= /tmp/smoke
 SMOKE_OUTPUT ?= $(HOME)/work/telemetry-smoke/package-results
+SMOKE_WHEEL ?=
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -30,7 +31,7 @@ build: ## Build and validate wheel and sdist
 
 smoke: ## Build and smoke an installed wheel outside the checkout (includes OTLP)
 	uv venv --allow-existing "$(SMOKE_VENV)"
-	uv run python smoke/install_wheel.py "$(SMOKE_VENV)"
+	uv run python smoke/install_wheel.py "$(SMOKE_VENV)" "$(SMOKE_WHEEL)"
 	uv pip install --python "$(SMOKE_VENV)" 'opentelemetry-exporter-otlp-proto-http>=1.39,<2'
 	"$(SMOKE_VENV)/bin/python" smoke/run_package.py "$(SMOKE_OUTPUT)"
 
