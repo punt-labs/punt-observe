@@ -42,6 +42,13 @@ def test_request_query_cannot_be_consumed_as_userinfo(path: str) -> None:
     assert shown == path + "?[query]"
 
 
+def test_slash_prefixed_credentials_cannot_expose_password_prefix() -> None:
+    shown = LogRedactor.settle("/USER_SECRET:PASS_SECRET?ss@host/x")
+    assert shown is not None
+    assert "USER_SECRET" not in shown
+    assert "PASS_SECRET" not in shown
+
+
 def _open_fifo(path: Path, connection: Connection) -> None:
     try:
         fd = PrivatePaths(path).open_private(os.O_RDONLY)

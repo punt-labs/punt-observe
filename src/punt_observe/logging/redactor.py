@@ -198,7 +198,9 @@ class LogRedactor:
             head, _, query = token.partition("?")
             return ("[userinfo]" if "@" in query else head) + "?[query]"
         elif "?" in token and "/" in token.partition("?")[0]:
-            head = token.partition("?")[0]
+            head, _, query = token.partition("?")
+            if ":" in head.rsplit("/", 1)[-1] and "@" in query:
+                return "[userinfo]"
             return cls._USERINFO.sub("[userinfo]@", head) + "?[query]"
         # A password may hold "?" and "#", so userinfo goes before the query.
         if "@" in token:
