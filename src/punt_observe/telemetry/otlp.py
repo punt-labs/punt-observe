@@ -20,12 +20,13 @@ class _PrivateSession:
 
     def request(self, method: str, url: str, **kwargs: Any) -> Any:
         """Pin wire settings even when SDK versions merge ambient configuration."""
+        timeout = kwargs.get("timeout")
         kwargs.update(
             headers={"Content-Type": "application/x-protobuf"},
             verify=True,
             cert=None,
             allow_redirects=False,
-            timeout=2,
+            timeout=2 if timeout is None else min(timeout, 2),
         )
         response = self._session.request(method, url, **kwargs)
         if 300 <= response.status_code < 400:

@@ -8,13 +8,15 @@ import logging
 import multiprocessing
 import os
 import sqlite3
+import time
 from multiprocessing.connection import Connection
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 from opentelemetry.sdk.metrics.export import MetricExportResult
+from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, use_span
@@ -365,9 +367,40 @@ def test_otlp_redirects_are_failures_not_silent_success(status: int) -> None:
         try:
             assert traces.export(spans.get_finished_spans()) == SpanExportResult.FAILURE
             assert (
-                metric_exporter.export(metrics.batches[0]) == MetricExportResult.FAILURE
+                cast(Any, metric_exporter).export(metrics.batches[0])
+                == MetricExportResult.FAILURE
             )
         finally:
             traces.shutdown()
-            metric_exporter.shutdown()
+            cast(Any, metric_exporter).shutdown()
     assert len(calls) == 2
+
+
+def test_otlp_retry_preserves_remaining_export_timeout() -> None:
+    pytest.importorskip("opentelemetry.exporter.otlp.proto.http.trace_exporter")
+    requests = importlib.import_module("requests")
+    timeouts: list[float] = []
+
+    def retry(session: Any, method: str, url: str, **kwargs: Any) -> Any:
+        timeouts.append(kwargs["timeout"])
+        response = requests.Response()
+        response.status_code = 503 if len(timeouts) == 1 else 200
+        response._content = b""
+        return response
+
+    now = time.time_ns()
+    span = ReadableSpan(
+        name="test.cli.run",
+        context=SpanContext(1, 2, False),
+        start_time=now,
+        end_time=now,
+    )
+    with patch.object(requests.Session, "request", retry):
+        traces, metrics = otlp.exporters("https://collector.invalid")
+        try:
+            assert traces.export([span]) == SpanExportResult.SUCCESS
+        finally:
+            traces.shutdown()
+            cast(Any, metrics).shutdown()
+    assert len(timeouts) == 2
+    assert 0 < timeouts[1] < timeouts[0] <= 2
