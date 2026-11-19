@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, use_span
 
 from punt_observe._private_fs import PrivatePaths
 from punt_observe.logging.redactor import LogRedactor
@@ -119,3 +120,37 @@ def test_deferred_task_event_outlives_its_inherited_span() -> None:
     assert [span.name for span in exported] == ["test.cli.run", "test.cli.used"]
     assert exported[1].parent is None
     assert exported[1].start_time == exported[1].end_time
+
+
+def test_metric_exemplars_never_inherit_host_context() -> None:
+    spans = InMemorySpanExporter()
+    metrics = CapturingMetricExporter()
+    telemetry = open_telemetry(
+        "test",
+        SCHEMAS,
+        TelemetryConfig(
+            exporter="otlp",
+            otlp_consent=True,
+            otlp_endpoint="http://unused",
+            exporter_factory=lambda _: (spans, metrics),
+        ),
+    )
+    host = NonRecordingSpan(
+        SpanContext(123, 456, False, TraceFlags(TraceFlags.SAMPLED))
+    )
+    try:
+        with use_span(host):
+            telemetry.count("test.cli.calls", 1)
+            telemetry.record("test.cli.duration", 1, 1.0)
+    finally:
+        telemetry.shutdown(5)
+    points = [
+        point
+        for batch in metrics.batches
+        for resource in batch.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        for point in metric.data.data_points
+    ]
+    assert len(points) == 2
+    assert all(not point.exemplars for point in points)

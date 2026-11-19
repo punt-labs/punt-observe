@@ -170,9 +170,9 @@ class Telemetry:
                     instrument = create(name, unit=schema.unit)
                     self._instruments[key] = instrument
             if kind == "counter":
-                cast(Any, instrument).add(value, validated)
+                cast(Any, instrument).add(value, validated, context=Context())
             else:
-                cast(Any, instrument).record(value, validated)
+                cast(Any, instrument).record(value, validated, context=Context())
         except Exception:
             warn("metric_failed")
 

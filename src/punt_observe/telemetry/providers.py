@@ -5,7 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, cast
 
-from opentelemetry.sdk.metrics import Counter, Histogram, MeterProvider
+from opentelemetry.sdk.metrics import (
+    AlwaysOffExemplarFilter,
+    Counter,
+    Histogram,
+    MeterProvider,
+)
 from opentelemetry.sdk.metrics.export import (
     AggregationTemporality,
     MetricExporter,
@@ -107,7 +112,10 @@ class Providers:
             export_timeout_millis=2000,
         )
         self.metrics = MeterProvider(
-            resource=resource, metric_readers=[self.reader], shutdown_on_exit=False
+            resource=resource,
+            metric_readers=[self.reader],
+            shutdown_on_exit=False,
+            exemplar_filter=AlwaysOffExemplarFilter(),
         )
         self.tracer = self.traces.get_tracer("punt_observe", "1")
         self.meter = self.metrics.get_meter("punt_observe", "1")
