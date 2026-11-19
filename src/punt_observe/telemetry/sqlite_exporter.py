@@ -115,12 +115,15 @@ class SQLiteStore:
                 for sql, rows in statements:
                     self._conn.executemany(sql, rows)
                 self._secure_sidecars()
-            if time.monotonic() - self._last_prune >= 3600:
-                self.prune()
-            return True
         except Exception:
             warn("sqlite_export_failed")
             return False
+        try:
+            if time.monotonic() - self._last_prune >= 3600:
+                self.prune()
+        except Exception:
+            warn("sqlite_prune_failed")
+        return True
 
     def close(self) -> None:
         """Close the store once all private providers have stopped."""

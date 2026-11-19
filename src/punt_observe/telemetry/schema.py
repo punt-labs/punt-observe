@@ -39,7 +39,18 @@ class IdentifierHash:
 class EnumAttr:
     """Allow only explicitly declared string constants."""
 
-    values: tuple[str, ...]
+    values: tuple[str, ...] | frozenset[str]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.values) not in (tuple, frozenset)
+            or not self.values
+            or any(
+                type(value) is not str or not re.fullmatch(r"[a-z][a-z0-9_-]*", value)
+                for value in self.values
+            )
+        ):
+            raise ValueError("invalid closed enum")
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +72,10 @@ class DurationAttr:
     """Allow a finite nonnegative duration in milliseconds."""
 
     unit: Literal["ms"] = "ms"
+
+    def __post_init__(self) -> None:
+        if self.unit not in ("ms",):
+            raise ValueError("duration unit must be ms")
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,11 +139,6 @@ class SignalSchema:
         for key, spec in self.attributes.items():
             if not re.fullmatch(r"[a-z][a-z0-9_]*", key):
                 raise ValueError("invalid attribute name")
-            if isinstance(spec, EnumAttr) and (
-                not spec.values
-                or any(not re.fullmatch(r"[a-z][a-z0-9_-]*", v) for v in spec.values)
-            ):
-                raise ValueError("invalid closed enum")
             if isinstance(spec, IntAttr) and (
                 spec.unit not in ("1", "ms", "s", "By")
                 or (

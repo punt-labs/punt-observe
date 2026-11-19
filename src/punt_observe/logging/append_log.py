@@ -239,22 +239,38 @@ class AtomicAppendLog:
         real filesystem is fail-safe (report ``False``) so a health check can never
         crash its surface.
         """
+        if not AtomicAppendLog._anchor_writable(path):
+            return False
         try:
-            mode = path.lstat().st_mode
+            info = path.lstat()
+            return (
+                stat.S_ISREG(info.st_mode)
+                and info.st_uid == os.getuid()
+                and os.access(path, os.W_OK)
+            )
         except FileNotFoundError:
-            return AtomicAppendLog._anchor_writable(path)
+            return True
         except OSError:
             return False
-        if not stat.S_ISREG(mode):
-            return False  # a symlink (O_NOFOLLOW refuses) or a non-regular entry
-        return os.access(path, os.W_OK)
 
     @staticmethod
     def _anchor_writable(path: Path) -> bool:
-        """Return whether *path*'s nearest existing ancestor grants create+search."""
+        """Probe creation access without following symlinks in owned levels."""
         try:
-            anchor = next(parent for parent in path.parents if parent.exists())
-            return anchor.is_dir() and os.access(anchor, os.W_OK | os.X_OK)
+            anchor: Path | None = None
+            root = PrivateState.root()
+            for parent in path.parents:
+                try:
+                    info = parent.lstat()
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                    return False
+                if anchor is None:
+                    anchor = parent
+                if parent == root or not parent.is_relative_to(root):
+                    break
+            return anchor is not None and os.access(anchor, os.W_OK | os.X_OK)
         except OSError:
             return False
 
