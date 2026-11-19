@@ -141,6 +141,8 @@ class SignalSchema:
                 raise ValueError("invalid attribute name")
             if isinstance(spec, IntAttr) and (
                 spec.unit not in ("1", "ms", "s", "By")
+                or (spec.min is not None and type(spec.min) is not int)
+                or (spec.max is not None and type(spec.max) is not int)
                 or (
                     spec.min is not None
                     and spec.max is not None
