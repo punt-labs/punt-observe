@@ -75,13 +75,13 @@ class SQLiteStore:
                 (json.dumps(resource, sort_keys=True),),
             )
             self._conn.commit()
-            self._secure_sidecars()
             self.prune()
         except BaseException:
             self._conn.close()
             raise
 
     def _secure_sidecars(self) -> None:
+        """Secure existing sidecars before SQLite acquires their POSIX locks."""
         for suffix in ("-wal", "-shm", "-journal"):
             path = self.path.with_name(self.path.name + suffix)
             if path.exists() or path.is_symlink():
@@ -114,7 +114,6 @@ class SQLiteStore:
                     return False
                 for sql, rows in statements:
                     self._conn.executemany(sql, rows)
-                self._secure_sidecars()
         except Exception:
             warn("sqlite_export_failed")
             return False

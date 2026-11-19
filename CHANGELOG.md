@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Preserve SQLite shared-memory locks during concurrent telemetry export by
+  securing sidecars only before connecting.
 - Keep active logs and rotated backups within the byte cap under concurrent
   writers, preserving whole records and allowing only individual oversized records.
 - Prune and incrementally vacuum idle local telemetry hourly on an interruptible
