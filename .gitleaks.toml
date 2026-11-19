@@ -1,0 +1,3 @@
+title = "Punt Observe secret scanning"
+[extend]
+useDefault = true
