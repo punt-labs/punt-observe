@@ -114,8 +114,15 @@ class LogRedactor:
         """Prebound work, retaining quarry's separate truncation marker."""
         if len(text) <= cls.MAX_RECORD:
             return text, ""
-        dropped = len(text[cls.MAX_RECORD :].encode("utf-8", errors="backslashreplace"))
-        return text[: cls.MAX_RECORD], f" […truncated {dropped} bytes]"
+        discarded = len(text) - cls.MAX_RECORD
+        if discarded <= cls.MAX_RECORD:
+            dropped = len(
+                text[cls.MAX_RECORD :].encode("utf-8", errors="backslashreplace")
+            )
+            marker = f" […truncated {dropped} bytes]"
+        else:
+            marker = f" […truncated at least {discarded} bytes]"
+        return text[: cls.MAX_RECORD], marker
 
     @classmethod
     def _finish(cls, text: str, marker: str) -> str:

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any, cast
 
-from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics import Counter, Histogram, MeterProvider
 from opentelemetry.sdk.metrics.export import (
+    AggregationTemporality,
     MetricExporter,
+    MetricExportResult,
+    MetricsData,
     PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.resources import Resource
@@ -24,6 +28,41 @@ from punt_observe.telemetry.sqlite_exporter import (
 )
 
 type ExporterFactory = Callable[[str], tuple[SpanExporter, MetricExporter]]
+
+
+class _DeltaMetricExporter(MetricExporter):
+    """Request deltas consistently for local, network and injected exporters."""
+
+    def __init__(self, exporter: MetricExporter) -> None:
+        super().__init__(
+            preferred_temporality={
+                Counter: AggregationTemporality.DELTA,
+                Histogram: AggregationTemporality.DELTA,
+            }
+        )
+        self._exporter = exporter
+
+    def export(
+        self,
+        metrics_data: MetricsData,
+        timeout_millis: float = 10_000,
+        **kwargs: Any,
+    ) -> MetricExportResult:
+        """Forward delta batches with the reader's export deadline."""
+        return cast(
+            MetricExportResult,
+            cast(Any, self._exporter).export(
+                metrics_data, timeout_millis=timeout_millis, **kwargs
+            ),
+        )
+
+    def force_flush(self, timeout_millis: float = 10_000) -> bool:
+        """Flush the selected exporter within the provided deadline."""
+        return self._exporter.force_flush(timeout_millis=timeout_millis)
+
+    def shutdown(self, timeout_millis: float = 30_000, **kwargs: Any) -> None:
+        """Stop the selected exporter without changing its lifecycle ownership."""
+        cast(Any, self._exporter).shutdown(timeout_millis=timeout_millis, **kwargs)
 
 
 class Providers:
@@ -63,7 +102,9 @@ class Providers:
         )
         self.traces.add_span_processor(self.processor)
         self.reader = PeriodicExportingMetricReader(
-            selected[1], export_interval_millis=1000, export_timeout_millis=2000
+            _DeltaMetricExporter(selected[1]),
+            export_interval_millis=60_000,
+            export_timeout_millis=2000,
         )
         self.metrics = MeterProvider(
             resource=resource, metric_readers=[self.reader], shutdown_on_exit=False

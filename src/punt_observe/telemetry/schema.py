@@ -5,9 +5,11 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from types import MappingProxyType
 from typing import Literal, cast
+
+from punt_observe.telemetry._hash_provenance import HASH_TOKEN
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +17,22 @@ class IdentifierHash:
     """Carry a shared-API-derived opaque identifier digest."""
 
     value: str
+    _proof: InitVar[object | None] = field(default=None, kw_only=True)
+    _attestation: tuple[object, str] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self, _proof: object | None) -> None:
+        if _proof is HASH_TOKEN:
+            object.__setattr__(self, "_attestation", (HASH_TOKEN, self.value))
+
+    def is_derived(self) -> bool:
+        """Return whether the internal identifier hasher attested this value."""
+        return (
+            self._attestation is not None
+            and self._attestation[0] is HASH_TOKEN
+            and self._attestation[1] == self.value
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +138,10 @@ class SignalSchema:
                 )
             ):
                 raise ValueError("invalid integer specification")
+            if isinstance(spec, CountAttr | SizeAttr | LengthAttr) and (
+                type(spec.min) is not int or spec.min < 0
+            ):
+                raise ValueError("nonnegative attribute requires a nonnegative minimum")
             if not isinstance(
                 cast(object, spec),
                 EnumAttr | BoolAttr | IntAttr | DurationAttr | HashAttr,
@@ -155,8 +177,10 @@ class SchemaRegistry:
             if spec is None:
                 return "unknown_attribute"
             if isinstance(spec, HashAttr):
-                if not isinstance(value, IdentifierHash) or not re.fullmatch(
-                    r"[0-9a-f]{32}", value.value
+                if (
+                    type(value) is not IdentifierHash
+                    or not value.is_derived()
+                    or not re.fullmatch(r"[0-9a-f]{32}", value.value)
                 ):
                     return "wrong_hash"
                 result[key] = value.value

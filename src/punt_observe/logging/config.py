@@ -84,5 +84,17 @@ def configure_logging(
             "root": {"level": "DEBUG", "handlers": list(handlers)},
         }
     )
+    fallback: logging.Handler = (
+        RedactingStreamHandler(sys.stderr)
+        if sys.stderr is not None
+        else logging.NullHandler()
+    )
+    fallback.setLevel(logging.WARNING)
+    fallback.setFormatter(
+        RedactingFormatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S"
+        )
+    )
+    logging.lastResort = fallback
     logging.getLogger(__name__).debug("Configured role=%s pid=%d", role, os.getpid())
     return path

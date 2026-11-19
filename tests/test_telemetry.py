@@ -29,7 +29,6 @@ from punt_observe.telemetry import (
     DurationAttr,
     EnumAttr,
     HashAttr,
-    IdentifierHash,
     IntAttr,
     LengthAttr,
     NoopTelemetry,
@@ -40,7 +39,7 @@ from punt_observe.telemetry import (
     open_telemetry,
 )
 from punt_observe.telemetry.config import resolve
-from punt_observe.telemetry.salt import load_salt
+from punt_observe.telemetry.salt import hash_identifier, load_salt
 from punt_observe.telemetry.sqlite_exporter import SQLiteStore
 
 
@@ -98,10 +97,12 @@ class CapturingMetricExporter(MetricExporter):
     "attrs",
     [
         {},
-        {"n": 2, "b": True, "e": "ok", "d": 1.5, "l": 0, "h": IdentifierHash("a" * 32)},
+        {"n": 2, "b": True, "e": "ok", "d": 1.5, "l": 0},
     ],
 )
 def test_schema_valid(attrs: dict[str, object]) -> None:
+    if attrs:
+        attrs = {**attrs, "h": hash_identifier("known-id")}
     registry = SchemaRegistry(
         [
             SignalSchema(

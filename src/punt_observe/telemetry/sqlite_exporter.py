@@ -102,11 +102,18 @@ class SQLiteStore:
 
     def write(self, sql: str, rows: list[tuple[Any, ...]]) -> bool:
         """Write a bounded exporter batch, converting storage errors to failure."""
+        return self.write_batch([(sql, rows)])
+
+    def write_batch(
+        self, statements: Sequence[tuple[str, list[tuple[Any, ...]]]]
+    ) -> bool:
+        """Commit all statements together, rolling the entire batch back on error."""
         try:
             with self._lock, self._conn:
                 if self._closed:
                     return False
-                self._conn.executemany(sql, rows)
+                for sql, rows in statements:
+                    self._conn.executemany(sql, rows)
                 self._secure_sidecars()
             if time.monotonic() - self._last_prune >= 3600:
                 self.prune()
@@ -164,12 +171,11 @@ class SQLiteSpanExporter(SpanExporter):
                 for event in span.events:
                     eversion, eattrs = _attributes(event.attributes)
                     events.append((sid, event.name, eversion, event.timestamp, eattrs))
-            success = self.store.write(
-                "INSERT INTO spans VALUES (?,?,?,?,?,?,?,?,?,?)", rows
-            )
-            success = (
-                self.store.write("INSERT INTO span_events VALUES (?,?,?,?,?)", events)
-                and success
+            success = self.store.write_batch(
+                [
+                    ("INSERT INTO spans VALUES (?,?,?,?,?,?,?,?,?,?)", rows),
+                    ("INSERT INTO span_events VALUES (?,?,?,?,?)", events),
+                ]
             )
             return SpanExportResult.SUCCESS if success else SpanExportResult.FAILURE
         except Exception:
