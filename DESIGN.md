@@ -27,7 +27,12 @@ Use HMAC-SHA256 truncated to 128 bits; never store raw IDs or salt in telemetry.
 
 Precreate private files before connecting. Use WAL and busy_timeout=2000,
 auto_vacuum=INCREMENTAL, user_version=1, startup/hourly export-triggered pruning,
-and incremental vacuum to reclaim expired storage, not just delete rows.
+and independent hourly maintenance so idle daemons also enforce retention. The
+provider bundle owns an interruptible daemon only when it owns a local store;
+the worker interval is injectable for tests. Each maintenance pass uses the same
+prune and incremental-vacuum operation, reclaiming storage rather than just rows.
+Failures emit only the existing rate-limited metadata diagnostic and do not end
+the schedule. Disabled capture and network-only export create no pruning worker.
 Retain 90 days by default; supported range is 1–3650 days, never unlimited.
 
 ## ADR-005: POSIX-only append protocol
@@ -43,5 +48,8 @@ physical line. Creation uses 0600, directory 0700, O_NOFOLLOW and fd tightening.
 BatchSpanProcessor bounds pending spans at 2048. Private metric readers bound
 export time; facade shutdown bounds its wait even for a misbehaving exporter.
 A timed-out exporter may finish on its daemon worker; it never stalls the tool.
+Shutdown cancels scheduled pruning immediately. In-flight maintenance is joined
+by the bounded facade's shutdown worker before closing the shared store; a stuck
+maintenance pass may finish later on its daemon, without extending caller waits.
 OTLP is lazily imported and requires config consent; missing extra falls back local.
 Exporter injection is an optional config factory for deterministic no-network tests.

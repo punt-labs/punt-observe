@@ -7,7 +7,7 @@ escapes its text to exactly one physical line and writes it in a *single*
 ``os.write`` under ``O_APPEND``. POSIX guarantees an ``O_APPEND`` write seeks to
 end and appends atomically, and a log line is far shorter than the platform's
 atomic-append size, so lines from concurrent processes never interleave -- no
-lock, no long-lived shared handle. Many writers therefore share one file safely.
+long-lived shared handle. Many writers therefore share one file safely.
 
 The error path must never re-enter the logging subsystem: many concurrent
 processes append here through ``logging``, so calling ``logger.*`` on an
@@ -19,7 +19,9 @@ stable ``<path>.rotate.lock`` file (never itself renamed, so the lock identity
 survives the rename chain). Every append holds ``LOCK_SH`` across
 ``open -> write -> close``; a rotation takes ``LOCK_EX`` -- which ``flock`` grants
 only once every shared holder has drained -- and re-checks the size before
-renaming. So no rename runs while any writer has an open append fd (no write to a
+renaming. An exclusive flock on the active append fd serializes the final size
+check and write while the shared rotation lock prevents renames. So no rename
+runs while any writer has an open append fd (no write to a
 renamed file), and at most one rotator renames per threshold crossing (no double
 rotate). This realizes the state model in ``docs/vox-2594-log-rotation.tex``.
 """
@@ -138,21 +140,23 @@ class AtomicAppendLog:
         """Append *line* under the rotate lock: shared to write, exclusive to rotate.
 
         Realizes the ``flock`` protocol modeled in
-        ``docs/vox-2594-log-rotation.tex``. A rotation runs first (only when this
-        line would cross ``max_bytes``) under ``LOCK_EX``; the write then runs
-        under ``LOCK_SH`` held across ``open -> write -> close``. Because
+        ``docs/vox-2594-log-rotation.tex``. The write runs under ``LOCK_SH`` held
+        across ``open -> write -> close``. If the locked append fd has no room,
+        release it and rotate under ``LOCK_EX``, then retry. Because
         ``LOCK_EX`` cannot be granted until every ``LOCK_SH`` holder has released,
         no rename ever runs while a writer has an open append fd.
         """
         lock_fd = self._open_lock()
         try:
-            if self._would_overflow(len(line)):
-                self._rotate_locked(lock_fd, len(line))
-            fcntl.flock(lock_fd, fcntl.LOCK_SH)
-            try:
-                self._write_line(line)
-            finally:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            while True:
+                fcntl.flock(lock_fd, fcntl.LOCK_SH)
+                try:
+                    if self._write_line(line):
+                        return
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                if not self._rotate_locked(lock_fd, len(line)):
+                    return
         finally:
             os.close(lock_fd)
 
@@ -183,7 +187,7 @@ class AtomicAppendLog:
             return False
         return size + incoming > self._max_bytes
 
-    def _rotate_locked(self, lock_fd: int, incoming: int) -> None:
+    def _rotate_locked(self, lock_fd: int, incoming: int) -> bool:
         """Rotate under ``LOCK_EX``, re-checking so a peer's rotate is a no-op.
 
         ``LOCK_EX`` blocks until every shared holder has drained, so the rename
@@ -194,12 +198,13 @@ class AtomicAppendLog:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         try:
             if self._would_overflow(incoming):
-                self._rotate()
+                return self._rotate()
+            return True
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
-    def _write_line(self, line: bytes) -> None:
-        """Append *line* through one ``O_APPEND`` fd; a short write goes to stderr.
+    def _write_line(self, line: bytes) -> bool:
+        """Append under the active fd's flock, or return False if it needs rotation.
 
         A short write (only ``ENOSPC`` in practice, since Python auto-retries
         ``EINTR``) is *not* looped: re-issuing the remainder would be a second
@@ -208,10 +213,15 @@ class AtomicAppendLog:
         """
         fd = self._guard.open_private(_OPEN_FLAGS)
         try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            size = os.fstat(fd).st_size
+            if self._max_bytes > 0 and size > 0 and size + len(line) > self._max_bytes:
+                return False
             if (written := os.write(fd, line)) != len(line):
                 self._to_stderr(
                     f"short append to {self._path}: {written} of {len(line)} bytes"
                 )
+            return True
         finally:
             os.close(fd)
 
@@ -317,8 +327,11 @@ class AtomicAppendLog:
             os.close(fd)
         return True
 
-    def _rotate(self) -> None:
-        """Best-effort rename chain; a failure leaves the sink appending in place."""
+    def _rotate(self) -> bool:
+        """Rename the backup chain, returning False if rotation cannot finish."""
+        if self._backup_count <= 0:
+            self._to_stderr("cannot rotate without backup slots")
+            return False
         for n in range(self._backup_count, 0, -1):
             src = (
                 self._path
@@ -331,8 +344,9 @@ class AtomicAppendLog:
                     src.replace(dst)
             except OSError as exc:
                 self._to_stderr(f"rotation stalled renaming {src}: {exc}")
-                return
+                return False
         self.tighten_existing()
+        return True
 
     @staticmethod
     def _to_stderr(message: str) -> None:

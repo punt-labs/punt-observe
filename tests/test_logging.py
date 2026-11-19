@@ -11,13 +11,16 @@ import os
 import re
 import stat
 import sys
+import threading
 from collections.abc import Iterator
+from multiprocessing.synchronize import Barrier
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from punt_observe.logging import LoggingSetupError, configure_logging, escape
+from punt_observe.logging.append_log import AtomicAppendLog
 from punt_observe.logging.formatter import RedactingFormatter
 from punt_observe.logging.handler import PrivateFileHandler
 from punt_observe.logging.redactor import LogRedactor
@@ -75,6 +78,109 @@ def test_multiprocess_rotation(tmp_path: Path) -> None:
             assert key not in seen
             seen.add(key)
     assert seen == {(i, j) for i in range(4) for j in range(25)}
+
+
+def _capped_record(identity: int, index: int) -> str:
+    prefix = f"writer={identity} line={index} "
+    return prefix + "x" * (255 - len(prefix))
+
+
+def _capped_writer(path: Path, identity: int, barrier: Barrier) -> None:
+    sink = AtomicAppendLog(path, max_bytes=768)
+    write = AtomicAppendLog._write_line
+
+    def slow_write(self: AtomicAppendLog, line: bytes) -> bool:
+        threading.Event().wait(0.01)
+        return write(self, line)
+
+    with patch.object(AtomicAppendLog, "_write_line", slow_write):
+        for index in range(4):
+            barrier.wait(timeout=15)
+            sink.append(_capped_record(identity, index))
+
+
+def test_concurrent_rotation_never_exceeds_cap(tmp_path: Path) -> None:
+    path = tmp_path / "capped.log"
+    ctx = multiprocessing.get_context("spawn")
+    barrier = ctx.Barrier(4)
+    processes = [
+        ctx.Process(target=_capped_writer, args=(path, identity, barrier))
+        for identity in range(4)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(30)
+            assert process.exitcode == 0
+        files = list(tmp_path.glob("capped.log*"))
+        records: list[str] = []
+        for file in files:
+            assert stat.S_IMODE(file.stat().st_mode) == 0o600
+            if file.name.endswith(".lock"):
+                continue
+            assert file.stat().st_size <= 768, (file.name, file.stat().st_size)
+            data = file.read_bytes()
+            assert data.endswith(b"\n")
+            lines = data.splitlines(keepends=True)
+            assert all(len(line) == 256 for line in lines)
+            records.extend(line.decode().removesuffix("\n") for line in lines)
+        assert len(records) == 16
+        assert set(records) == {
+            _capped_record(identity, index)
+            for identity in range(4)
+            for index in range(4)
+        }
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+
+
+@pytest.mark.parametrize(
+    ("max_bytes", "records"),
+    [
+        (8, [""] * 8),
+        (8, ["abc", "abc", "x"]),
+        (8, ["0123456789", "x", "abcdefghij"]),
+        (0, ["x" * 16] * 3),
+        (-1, ["x" * 16] * 3),
+    ],
+)
+def test_rotation_keeps_individual_records_whole(
+    tmp_path: Path, max_bytes: int, records: list[str]
+) -> None:
+    path = tmp_path / "whole.log"
+    sink = AtomicAppendLog(path, max_bytes=max_bytes)
+    for record in records:
+        sink.append(record)
+    written: list[str] = []
+    for file in tmp_path.glob("whole.log*"):
+        if file.name.endswith(".lock"):
+            continue
+        data = file.read_bytes()
+        lines = data.splitlines(keepends=True)
+        assert stat.S_IMODE(file.stat().st_mode) == 0o600
+        assert all(line.endswith(b"\n") for line in lines)
+        if max_bytes > 0 and len(data) > max_bytes:
+            assert len(lines) == 1
+            assert len(lines[0]) > max_bytes
+        written.extend(line.decode().removesuffix("\n") for line in lines)
+    assert sorted(written) == sorted(records)
+
+
+@pytest.mark.parametrize("backup_count", [0, 5])
+def test_rotation_failure_returns_without_overfilling(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str], backup_count: int
+) -> None:
+    path = tmp_path / "stalled.log"
+    sink = AtomicAppendLog(path, max_bytes=4, backup_count=backup_count)
+    sink.append("abc")
+    with patch.object(Path, "replace", side_effect=PermissionError("denied")):
+        sink.append("def")
+    assert path.read_text() == "abc\n"
+    assert "[append-log]" in capfd.readouterr().err
 
 
 def test_configuration(

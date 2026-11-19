@@ -21,6 +21,9 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from punt_observe._private_fs import PrivatePaths
 from punt_observe.telemetry._diagnostics import warn
 
+# Never close inherited handles: SQLite may have forked with an internal mutex held.
+_INHERITED_CONNECTIONS: list[sqlite3.Connection] = []
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS spans(
@@ -59,7 +62,9 @@ class SQLiteStore:
         self._closed = False
         PrivatePaths(path).secure()
         self._secure_sidecars()
-        self._conn = sqlite3.connect(path, timeout=2, check_same_thread=False)
+        self._conn: sqlite3.Connection | None = sqlite3.connect(
+            path, timeout=2, check_same_thread=False
+        )
         try:
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 1):
@@ -75,29 +80,47 @@ class SQLiteStore:
                 (json.dumps(resource, sort_keys=True),),
             )
             self._conn.commit()
-            self._secure_sidecars()
             self.prune()
         except BaseException:
             self._conn.close()
             raise
 
     def _secure_sidecars(self) -> None:
+        """Secure existing sidecars before SQLite acquires their POSIX locks."""
         for suffix in ("-wal", "-shm", "-journal"):
             path = self.path.with_name(self.path.name + suffix)
             if path.exists() or path.is_symlink():
                 PrivatePaths(path).secure()
 
+    def reset_after_fork(self) -> None:
+        """Replace inherited synchronization and defer opening a child connection."""
+        self._lock = threading.Lock()
+        if self._conn is not None:
+            _INHERITED_CONNECTIONS.append(self._conn)
+            self._conn = None
+        self._last_prune = 0.0
+
+    def _connection(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.path, timeout=2, check_same_thread=False)
+        return self._conn
+
     def prune(self) -> None:
         """Delete expired signals and reclaim free pages incrementally."""
         cutoff = time.time_ns() - self.retention_days * 86_400 * 1_000_000_000
-        with self._lock, self._conn:
-            self._conn.execute("DELETE FROM spans WHERE end_ns < ?", (cutoff,))
-            self._conn.execute("DELETE FROM span_events WHERE ts_ns < ?", (cutoff,))
-            self._conn.execute("DELETE FROM metric_points WHERE ts_ns < ?", (cutoff,))
         with self._lock:
-            self._conn.execute("PRAGMA incremental_vacuum").fetchall()
-            self._conn.commit()
-            self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            if self._closed:
+                return
+            connection = self._connection()
+            with connection:
+                connection.execute("DELETE FROM spans WHERE end_ns < ?", (cutoff,))
+                connection.execute("DELETE FROM span_events WHERE ts_ns < ?", (cutoff,))
+                connection.execute(
+                    "DELETE FROM metric_points WHERE ts_ns < ?", (cutoff,)
+                )
+            connection.execute("PRAGMA incremental_vacuum").fetchall()
+            connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
             self._last_prune = time.monotonic()
 
     def write(self, sql: str, rows: list[tuple[Any, ...]]) -> bool:
@@ -109,12 +132,13 @@ class SQLiteStore:
     ) -> bool:
         """Commit all statements together, rolling the entire batch back on error."""
         try:
-            with self._lock, self._conn:
+            with self._lock:
                 if self._closed:
                     return False
-                for sql, rows in statements:
-                    self._conn.executemany(sql, rows)
-                self._secure_sidecars()
+                connection = self._connection()
+                with connection:
+                    for sql, rows in statements:
+                        connection.executemany(sql, rows)
         except Exception:
             warn("sqlite_export_failed")
             return False
@@ -130,7 +154,8 @@ class SQLiteStore:
         with self._lock:
             if not self._closed:
                 self._closed = True
-                self._conn.close()
+                if self._conn is not None:
+                    self._conn.close()
 
 
 def _attributes(attrs: Any) -> tuple[int, str]:
