@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import multiprocessing
 import os
 import sqlite3
 from multiprocessing.connection import Connection
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -250,3 +252,64 @@ def test_forked_exports_keep_only_private_resource_allowlist() -> None:
         telemetry.shutdown(5)
         parent.close()
         child.close()
+
+
+def test_otlp_export_does_not_inherit_host_exporter_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("opentelemetry.exporter.otlp.proto.http.trace_exporter")
+    requests = importlib.import_module("requests")
+    sent: list[dict[str, Any]] = []
+
+    def request(session: Any, method: str, url: str, **kwargs: Any) -> Any:
+        sent.append(
+            {
+                "url": url,
+                "headers": kwargs.get("headers", session.headers),
+                "verify": kwargs.get("verify", session.verify),
+                "cert": kwargs.get("cert", session.cert),
+                "data": kwargs.get("data"),
+            }
+        )
+        response = requests.Response()
+        response.status_code, response._content = 200, b""
+        return response
+
+    for prefix in (
+        "OTEL_EXPORTER_OTLP",
+        "OTEL_EXPORTER_OTLP_TRACES",
+        "OTEL_EXPORTER_OTLP_METRICS",
+    ):
+        for suffix, value in {
+            "HEADERS": "Authorization=HOST_SECRET,x-profile=HOST_SECRET",
+            "CERTIFICATE": "/host/ca",
+            "CLIENT_CERTIFICATE": "/host/cert",
+            "CLIENT_KEY": "/host/key",
+            "COMPRESSION": "gzip",
+            "ENDPOINT": "https://host.invalid",
+            "TIMEOUT": "99",
+        }.items():
+            monkeypatch.setenv(prefix + "_" + suffix, value)
+    with patch.object(requests.Session, "request", request):
+        telemetry = open_telemetry(
+            "test",
+            SCHEMAS,
+            TelemetryConfig(
+                exporter="otlp",
+                otlp_consent=True,
+                otlp_endpoint="https://collector.invalid",
+            ),
+        )
+        with telemetry.span("test.cli.run", 1):
+            pass
+        telemetry.count("test.cli.calls", 1)
+        telemetry.shutdown(5)
+    assert {item["url"] for item in sent} == {
+        "https://collector.invalid/v1/traces",
+        "https://collector.invalid/v1/metrics",
+    }
+    for item in sent:
+        assert "HOST_SECRET" not in str(item["headers"])
+        assert item["verify"] is True
+        assert item["cert"] is None
+        assert not item["data"].startswith(b"\x1f\x8b")
