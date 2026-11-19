@@ -243,8 +243,6 @@ class LogRedactor:
         after a bare host stays in the URL, where the host position is masked.
         """
         core, tail = cls._peel(url)
-        while core.endswith("'"):
-            core, tail = core[:-1], "'" + tail
         rest = core.partition("://")[2]
         if ":" in tail and not any(char in rest for char in "/?#"):
             return url, ""
@@ -283,7 +281,7 @@ class LogRedactor:
         last = url[end - 1]
         opener = cls._OPENERS.get(last)
         if opener is None:
-            return last in ".,:;"
+            return last in ".,:;'"
         return url.count(last, 0, end) > url.count(opener, 0, end)
 
     @classmethod
