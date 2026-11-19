@@ -68,9 +68,11 @@ class LogRedactor:
     # ends a match early.  The host is the rest of the authority, and is shown only
     # if it is a plain host name or bracketed IP literal with a numeric port.
     _SCHEME_URL: ClassVar[re.Pattern[str]] = re.compile(
+        r"(?P<quoted>(?<='))?"
         r"(?<![A-Za-z0-9+.\-])(?P<scheme>[A-Za-z0-9+.\-]{1,2047})://"
         r"(?:[^\s/\\?#]*@)?(?P<host>[^\s/\\?#'\"<>@]*)"
-        r"(?P<path>(?:[^\s?#'\"<>][^\s?#\"<>]*)?)(?:[?#]\S*)?"
+        r"(?P<path>(?(quoted)[^\s?#'\"<>]*|(?:[^\s?#'\"<>][^\s?#\"<>]*)?))"
+        r"(?:[?#](?(quoted)[^\s']*|\S*))?"
     )
     _FORM: ClassVar[re.Pattern[str]] = re.compile(r"/…\(segments=\d+\)[).,;:\]}]*")
     # Scheme-less "user:password@": tried only where a run of user characters

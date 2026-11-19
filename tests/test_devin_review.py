@@ -26,7 +26,7 @@ from tests.test_telemetry import SCHEMAS, CapturingMetricExporter
 
 
 @pytest.mark.parametrize(
-    "text", ["https://h/o'brien/SECRET", "'https://h/o'brien/SECRET'"]
+    "text", ["https://h/o'brien/SECRET", "'https://h/o%27brien/SECRET'"]
 )
 def test_apostrophe_does_not_end_url_path_redaction(text: str) -> None:
     shown = LogRedactor.settle(text)
@@ -47,6 +47,12 @@ def test_slash_prefixed_credentials_cannot_expose_password_prefix() -> None:
     assert shown is not None
     assert "USER_SECRET" not in shown
     assert "PASS_SECRET" not in shown
+
+
+def test_single_quoted_url_stops_before_the_next_field() -> None:
+    assert (
+        LogRedactor.settle("'https://h/p'next=1") == "'https://h/…(segments=1)'next=1"
+    )
 
 
 def _open_fifo(path: Path, connection: Connection) -> None:
