@@ -15,7 +15,7 @@ from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, use_s
 
 from punt_observe._private_fs import PrivatePaths
 from punt_observe.logging.redactor import LogRedactor
-from punt_observe.telemetry import TelemetryConfig, open_telemetry
+from punt_observe.telemetry import Telemetry, TelemetryConfig, open_telemetry
 from punt_observe.telemetry.sqlite_exporter import SQLiteStore
 from tests.test_telemetry import SCHEMAS, CapturingMetricExporter
 
@@ -154,3 +154,59 @@ def test_metric_exemplars_never_inherit_host_context() -> None:
     ]
     assert len(points) == 2
     assert all(not point.exemplars for point in points)
+
+
+def _fork_resources(
+    telemetry: Telemetry,
+    spans: InMemorySpanExporter,
+    metrics: CapturingMetricExporter,
+    output: Connection,
+) -> None:
+    with telemetry.span("test.cli.run", 1):
+        pass
+    telemetry.count("test.cli.calls", 1)
+    telemetry.shutdown(5)
+    output.send(
+        [
+            *[dict(span.resource.attributes) for span in spans.get_finished_spans()],
+            *[
+                dict(resource.resource.attributes)
+                for batch in metrics.batches
+                for resource in batch.resource_metrics
+            ],
+        ]
+    )
+    output.close()
+
+
+def test_forked_exports_keep_only_private_resource_allowlist() -> None:
+    spans = InMemorySpanExporter()
+    metrics = CapturingMetricExporter()
+    telemetry = open_telemetry(
+        "test",
+        SCHEMAS,
+        TelemetryConfig(
+            exporter="otlp",
+            otlp_consent=True,
+            otlp_endpoint="http://unused",
+            exporter_factory=lambda _: (spans, metrics),
+        ),
+    )
+    parent, child = multiprocessing.Pipe()
+    process = multiprocessing.get_context("fork").Process(
+        target=_fork_resources, args=(telemetry, spans, metrics, child)
+    )
+    try:
+        process.start()
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+            pytest.fail("forked telemetry shutdown blocked")
+        assert process.exitcode == 0
+        assert parent.poll(1)
+        assert parent.recv() == [{"service.name": "test", "punt.schema": 1}] * 2
+    finally:
+        telemetry.shutdown(5)
+        parent.close()
+        child.close()

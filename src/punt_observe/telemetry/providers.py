@@ -35,6 +35,12 @@ from punt_observe.telemetry.sqlite_exporter import (
 type ExporterFactory = Callable[[str], tuple[SpanExporter, MetricExporter]]
 
 
+class _PrivateResource(Resource):
+    def merge(self, other: Resource) -> Resource:
+        """Keep the fixed allowlist intact across SDK post-fork refreshes."""
+        return self
+
+
 class _DeltaMetricExporter(MetricExporter):
     """Request deltas consistently for local, network and injected exporters."""
 
@@ -81,7 +87,7 @@ class Providers:
     ) -> None:
         self.store: SQLiteStore | None = None
         resource_attrs: dict[str, str | int] = {"service.name": tool, "punt.schema": 1}
-        resource = Resource(resource_attrs)
+        resource = _PrivateResource(resource_attrs)
         selected: tuple[SpanExporter, MetricExporter] | None = None
         if config.exporter == "otlp" and config.otlp_endpoint:
             try:
