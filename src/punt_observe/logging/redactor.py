@@ -197,6 +197,9 @@ class LogRedactor:
             # may instead be ``user:digits?...@host``, so the head is masked too.
             head, _, query = token.partition("?")
             return ("[userinfo]" if "@" in query else head) + "?[query]"
+        elif "?" in token and "/" in token.partition("?")[0]:
+            head = token.partition("?")[0]
+            return cls._USERINFO.sub("[userinfo]@", head) + "?[query]"
         # A password may hold "?" and "#", so userinfo goes before the query.
         if "@" in token:
             token = cls._USERINFO.sub("[userinfo]@", token)
