@@ -28,6 +28,110 @@ from punt_observe.telemetry.providers import Providers
 
 exit_registry = cast(Any, _exit)
 
+
+@pytest.fixture(autouse=True)
+def isolate_exit_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_exit, "_exiting", False, raising=False)
+
+
+def test_exit_waits_for_worker_registration(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    attempted = threading.Event()
+    finished = threading.Event()
+    flushed = threading.Event()
+    tasks: list[_exit.ExitFlush] = []
+    original_start = threading.Thread.start
+
+    class ObservedLock:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.contended = False
+
+        def acquire(self, timeout: float = -1) -> bool:
+            acquired = self.lock.acquire(blocking=False)
+            self.contended = not acquired
+            attempted.set()
+            return acquired or self.lock.acquire(timeout=timeout)
+
+        def release(self) -> None:
+            self.lock.release()
+
+        def __enter__(self) -> None:
+            self.lock.acquire()
+
+        def __exit__(self, *args: object) -> None:
+            self.release()
+
+    lock = ObservedLock()
+    monkeypatch.setattr(_exit, "_lock", lock)
+
+    def start(thread: threading.Thread) -> None:
+        original_start(thread)
+        if thread.name == "punt-observe-exit":
+            started.set()
+            assert release.wait(5)
+
+    def close() -> None:
+        exit_registry._shutdown_at_exit()
+        finished.set()
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    creator = threading.Thread(
+        target=lambda: tasks.append(_exit.ExitFlush(lambda timeout: flushed.set())),
+        daemon=True,
+    )
+    closer = threading.Thread(target=close, daemon=True)
+    try:
+        creator.start()
+        assert started.wait(5)
+        closer.start()
+        assert attempted.wait(5)
+        if not lock.contended:
+            assert finished.wait(5)
+        release.set()
+        creator.join(5)
+        closer.join(5)
+        assert not creator.is_alive() and not closer.is_alive()
+        assert flushed.is_set(), "exit snapshot missed the started worker"
+        assert not exit_registry._pending
+    finally:
+        release.set()
+        creator.join(5)
+        if closer.ident is not None:
+            closer.join(5)
+        for task in tasks:
+            task.cancel()
+            cast(Any, task)._thread.join(5)
+
+
+def test_registration_after_exit_does_not_leave_a_waiting_worker() -> None:
+    exit_registry._shutdown_at_exit()
+    task = _exit.ExitFlush(lambda timeout: None)
+    try:
+        assert not cast(Any, task)._thread.is_alive()
+        assert not exit_registry._pending
+        assert cast(Any, task)._done.is_set()
+    finally:
+        task.cancel()
+        if cast(Any, task)._thread.ident is not None:
+            cast(Any, task)._thread.join(5)
+
+
+def test_worker_start_failure_rolls_back_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending = set(exit_registry._pending)
+
+    def fail(thread: threading.Thread) -> None:
+        raise RuntimeError("worker unavailable")
+
+    monkeypatch.setattr(threading.Thread, "start", fail)
+    with pytest.raises(RuntimeError, match="worker unavailable"):
+        _exit.ExitFlush(lambda timeout: None)
+    assert exit_registry._pending == pending
+
+
 SCRIPT = r"""
 import sys
 sys.path.append(sys.argv[2])  # Reuse only third-party dependencies of the test runner.

@@ -12,6 +12,7 @@ from punt_observe.telemetry._diagnostics import warn
 _TIMEOUT_S = 2.0
 _lock = threading.Lock()
 _pending: set[ExitFlush] = set()
+_exiting = False
 
 
 class ExitFlush:
@@ -26,9 +27,18 @@ class ExitFlush:
         self._thread = threading.Thread(
             target=self._run, name="punt-observe-exit", daemon=True
         )
-        self._thread.start()
         with _lock:
+            if _exiting:
+                self._cancelled = True
+                self._done.set()
+                return
             _pending.add(self)
+        try:
+            self._thread.start()
+        except BaseException:
+            self.cancel()
+            self._done.set()
+            raise
 
     def _run(self) -> None:
         self._ready.wait()
@@ -59,16 +69,19 @@ class ExitFlush:
 
 def reset_after_fork() -> None:
     """Discard parent-only work without touching inherited synchronization."""
-    global _lock, _pending
+    global _lock, _pending, _exiting
     _lock = threading.Lock()
     _pending = set()
+    _exiting = False
 
 
 def _shutdown_at_exit() -> None:
+    global _exiting
     deadline = time.monotonic() + _TIMEOUT_S
     if not _lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
         return
     try:
+        _exiting = True
         pending = tuple(_pending)
         _pending.clear()
     finally:

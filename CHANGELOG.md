@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Publish exit work before starting its worker and reject activation after exit
+  begins, preventing missed flushes and stranded exit workers during registration.
 - Force-flush metrics and queued spans/events at shutdown; flush pending providers
   on normal process exit through one failure-isolated, two-second-total atexit
   registry. Explicit shutdown cancels exit work; forked children opt in only after
