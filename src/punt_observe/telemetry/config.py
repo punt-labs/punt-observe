@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, replace
-from typing import Literal
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Literal
 
 from punt_observe._private_fs import PrivatePaths
+
+if TYPE_CHECKING:
+    from punt_observe.telemetry.providers import ExporterFactory
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +25,9 @@ class TelemetryConfig:
     exporter: Literal["sqlite", "otlp"] = "sqlite"
     otlp_endpoint: str | None = None
     otlp_consent: bool = False
+    exporter_factory: ExporterFactory | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if type(self.retention_days) is not int or not 1 <= self.retention_days <= 3650:

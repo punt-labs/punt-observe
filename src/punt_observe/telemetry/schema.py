@@ -7,7 +7,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, cast
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +88,9 @@ class SignalSchema:
     name: str
     version: int
     kind: Kind
-    attributes: Mapping[str, AttributeSpec] = field(default_factory=dict)
+    attributes: Mapping[str, AttributeSpec] = field(
+        default_factory=dict[str, AttributeSpec]
+    )
     unit: str = "1"
 
     def __post_init__(self) -> None:
@@ -105,16 +107,23 @@ class SignalSchema:
             if not re.fullmatch(r"[a-z][a-z0-9_]*", key):
                 raise ValueError("invalid attribute name")
             if isinstance(spec, EnumAttr) and (
-                not spec.values or any(not re.fullmatch(r"[a-z][a-z0-9_-]*", v)
-                                       for v in spec.values)
+                not spec.values
+                or any(not re.fullmatch(r"[a-z][a-z0-9_-]*", v) for v in spec.values)
             ):
                 raise ValueError("invalid closed enum")
-            if isinstance(spec, IntAttr):
-                if spec.unit not in ("1", "ms", "s", "By") or (
-                    spec.min is not None and spec.max is not None and spec.min > spec.max
-                ):
-                    raise ValueError("invalid integer specification")
-            if not isinstance(spec, EnumAttr | BoolAttr | IntAttr | DurationAttr | HashAttr):
+            if isinstance(spec, IntAttr) and (
+                spec.unit not in ("1", "ms", "s", "By")
+                or (
+                    spec.min is not None
+                    and spec.max is not None
+                    and spec.min > spec.max
+                )
+            ):
+                raise ValueError("invalid integer specification")
+            if not isinstance(
+                cast(object, spec),
+                EnumAttr | BoolAttr | IntAttr | DurationAttr | HashAttr,
+            ):
                 raise ValueError("unknown attribute specification")
         object.__setattr__(self, "attributes", MappingProxyType(dict(self.attributes)))
 
@@ -158,11 +167,18 @@ class SchemaRegistry:
             elif isinstance(spec, BoolAttr):
                 valid = type(value) is bool
             elif isinstance(spec, IntAttr):
-                valid = type(value) is int and (
-                    spec.min is None or value >= spec.min
-                ) and (spec.max is None or value <= spec.max)
-            elif isinstance(spec, DurationAttr):
-                valid = type(value) in (int, float) and isinstance(value, int | float) and math.isfinite(value) and value >= 0
+                valid = (
+                    type(value) is int
+                    and (spec.min is None or value >= spec.min)
+                    and (spec.max is None or value <= spec.max)
+                )
+            else:
+                valid = (
+                    type(value) in (int, float)
+                    and isinstance(value, int | float)
+                    and math.isfinite(value)
+                    and value >= 0
+                )
             if not valid or not isinstance(value, str | bool | int | float):
                 return "wrong_type_or_range"
             result[key] = value

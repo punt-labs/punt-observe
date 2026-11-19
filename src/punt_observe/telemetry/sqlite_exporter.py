@@ -147,18 +147,30 @@ class SQLiteSpanExporter(SpanExporter):
                     continue
                 version, attrs = _attributes(span.attributes)
                 sid = f"{context.span_id:016x}"
-                rows.append((
-                    f"{context.trace_id:032x}", sid,
-                    f"{span.parent.span_id:016x}" if span.parent else None,
-                    span.name, version,
-                    (span.attributes or {}).get("punt.signal", "span"),
-                    span.start_time, span.end_time, span.status.status_code.name, attrs,
-                ))
+                rows.append(
+                    (
+                        f"{context.trace_id:032x}",
+                        sid,
+                        f"{span.parent.span_id:016x}" if span.parent else None,
+                        span.name,
+                        version,
+                        (span.attributes or {}).get("punt.signal", "span"),
+                        span.start_time,
+                        span.end_time,
+                        span.status.status_code.name,
+                        attrs,
+                    )
+                )
                 for event in span.events:
                     eversion, eattrs = _attributes(event.attributes)
                     events.append((sid, event.name, eversion, event.timestamp, eattrs))
-            success = self.store.write("INSERT INTO spans VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
-            success = self.store.write("INSERT INTO span_events VALUES (?,?,?,?,?)", events) and success
+            success = self.store.write(
+                "INSERT INTO spans VALUES (?,?,?,?,?,?,?,?,?,?)", rows
+            )
+            success = (
+                self.store.write("INSERT INTO span_events VALUES (?,?,?,?,?)", events)
+                and success
+            )
             return SpanExportResult.SUCCESS if success else SpanExportResult.FAILURE
         except Exception:
             warn("span_export_failed")
@@ -176,7 +188,9 @@ class SQLiteMetricExporter(MetricExporter):
         self.store = store
 
     def export(
-        self, metrics_data: MetricsData, timeout_millis: float = 10_000,
+        self,
+        metrics_data: MetricsData,
+        timeout_millis: float = 10_000,
         **kwargs: Any,
     ) -> MetricExportResult:
         """Persist metric points or return FAILURE without propagating errors."""
@@ -188,15 +202,23 @@ class SQLiteMetricExporter(MetricExporter):
                         for point in metric.data.data_points:
                             version, attrs = _attributes(point.attributes)
                             histogram = hasattr(point, "count")
-                            rows.append((
-                                metric.name, version,
-                                "histogram" if histogram else "counter", metric.unit,
-                                point.start_time_unix_nano, point.time_unix_nano,
-                                getattr(point, "value", None),
-                                getattr(point, "count", None),
-                                getattr(point, "sum", None), attrs,
-                            ))
-            ok = self.store.write("INSERT INTO metric_points VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+                            rows.append(
+                                (
+                                    metric.name,
+                                    version,
+                                    "histogram" if histogram else "counter",
+                                    metric.unit,
+                                    point.start_time_unix_nano,
+                                    point.time_unix_nano,
+                                    getattr(point, "value", None),
+                                    getattr(point, "count", None),
+                                    getattr(point, "sum", None),
+                                    attrs,
+                                )
+                            )
+            ok = self.store.write(
+                "INSERT INTO metric_points VALUES (?,?,?,?,?,?,?,?,?,?)", rows
+            )
             return MetricExportResult.SUCCESS if ok else MetricExportResult.FAILURE
         except Exception:
             warn("metric_export_failed")

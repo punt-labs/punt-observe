@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from contextlib import suppress
 
 logger = logging.getLogger("punt_observe.telemetry")
 _lock = threading.Lock()
@@ -19,7 +20,5 @@ def warn(reason: str) -> None:
         if now - _last < 60:
             return
         _last = now
-    try:
+    with suppress(Exception):
         logger.warning("Telemetry dropped: %s", reason)
-    except Exception:
-        pass

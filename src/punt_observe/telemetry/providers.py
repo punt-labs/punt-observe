@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import MetricExporter, PeriodicExportingMetricReader
+from opentelemetry.sdk.metrics.export import (
+    MetricExporter,
+    PeriodicExportingMetricReader,
+)
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
@@ -27,7 +30,9 @@ class Providers:
     """Own private resource, exporters, workers and their shared storage."""
 
     def __init__(
-        self, tool: str, config: TelemetryConfig,
+        self,
+        tool: str,
+        config: TelemetryConfig,
         exporter_factory: ExporterFactory | None = None,
     ) -> None:
         self.store: SQLiteStore | None = None
@@ -36,19 +41,25 @@ class Providers:
         selected: tuple[SpanExporter, MetricExporter] | None = None
         if config.exporter == "otlp" and config.otlp_endpoint:
             try:
-                selected = (exporter_factory or otlp.exporters)(config.otlp_endpoint)
+                selected = (
+                    exporter_factory or config.exporter_factory or otlp.exporters
+                )(config.otlp_endpoint)
             except ImportError:
                 warn("otlp_extra_missing")
         if selected is None:
             self.store = SQLiteStore(
-                PrivatePaths.root(tool) / "telemetry.db", config.retention_days,
+                PrivatePaths.root(tool) / "telemetry.db",
+                config.retention_days,
                 resource_attrs,
             )
             selected = SQLiteSpanExporter(self.store), SQLiteMetricExporter(self.store)
         self.traces = TracerProvider(resource=resource, shutdown_on_exit=False)
         self.processor = BatchSpanProcessor(
-            selected[0], max_queue_size=2048, max_export_batch_size=512,
-            schedule_delay_millis=1000, export_timeout_millis=2000,
+            selected[0],
+            max_queue_size=2048,
+            max_export_batch_size=512,
+            schedule_delay_millis=1000,
+            export_timeout_millis=2000,
         )
         self.traces.add_span_processor(self.processor)
         self.reader = PeriodicExportingMetricReader(

@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import os
 import secrets
+from contextlib import suppress
 
 from punt_observe._private_fs import PrivatePaths
 from punt_observe.telemetry.schema import IdentifierHash
@@ -28,10 +29,8 @@ def load_salt() -> bytes:
         if os.write(fd, salt) != 32:
             raise OSError("short salt write")
         os.fsync(fd)
-        try:
+        with suppress(FileExistsError):
             os.link(temporary, path)
-        except FileExistsError:
-            pass
     finally:
         os.close(fd)
         temporary.unlink(missing_ok=True)
@@ -52,4 +51,6 @@ def hash_identifier(value: str) -> IdentifierHash:
         OSError: Salt storage is unavailable.
         ValueError: The stored salt is invalid.
     """
-    return IdentifierHash(hmac.new(load_salt(), value.encode(), hashlib.sha256).hexdigest()[:32])
+    return IdentifierHash(
+        hmac.new(load_salt(), value.encode(), hashlib.sha256).hexdigest()[:32]
+    )

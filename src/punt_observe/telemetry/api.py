@@ -5,12 +5,13 @@ from __future__ import annotations
 import math
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, cast
 
-from opentelemetry.trace import Span, Status, StatusCode
+from opentelemetry.context import Context
+from opentelemetry.trace import Span, Status, StatusCode, set_span_in_context
 
 from punt_observe.telemetry._diagnostics import warn
 from punt_observe.telemetry.config import TelemetryConfig, resolve
@@ -23,23 +24,29 @@ from punt_observe.telemetry.schema import (
     Value,
 )
 
+_DEFAULT_CONFIG = TelemetryConfig()
+
 
 class Telemetry:
     """Observe closed-schema signals without changing the caller's result."""
 
     def __init__(
-        self, tool: str, schemas: Sequence[SignalSchema],
-        config: TelemetryConfig = TelemetryConfig(), *,
+        self,
+        tool: str,
+        schemas: Sequence[SignalSchema],
+        config: TelemetryConfig = _DEFAULT_CONFIG,
+        *,
         exporter_factory: ExporterFactory | None = None,
     ) -> None:
         self._providers: Providers | None = None
-        self._registry = SchemaRegistry(list(schemas))
+        self._registry = SchemaRegistry([])
         self._tool = tool
         self._current: ContextVar[Span | None] = ContextVar("punt_span", default=None)
         self._instruments: dict[tuple[str, int], Any] = {}
         self._lock = threading.Lock()
         self._stopped = False
         try:
+            self._registry = SchemaRegistry(list(schemas))
             effective = resolve(tool, config)
             if effective.enabled:
                 self._providers = Providers(tool, effective, exporter_factory)
@@ -53,7 +60,11 @@ class Telemetry:
             return None
         try:
             schema = self._registry.get(name, version)
-            if schema is None or schema.kind != kind or not name.startswith(self._tool + "."):
+            if (
+                schema is None
+                or schema.kind != kind
+                or not name.startswith(self._tool + ".")
+            ):
                 warn("unknown_schema_or_kind")
                 return None
             validated = self._registry.validate(name, version, attrs)
@@ -67,7 +78,7 @@ class Telemetry:
             return None
 
     @contextmanager
-    def span(self, name: str, version: int, **attrs: object) -> Iterator[None]:
+    def span(self, name: str, version: int, **attrs: object) -> Generator[None]:
         """Observe a span without capturing exception text or suppressing errors.
 
         Exceptions from the caller's context propagate unchanged; instrumentation
@@ -78,7 +89,13 @@ class Telemetry:
         try:
             validated = self._validate(name, version, attrs, "span")
             if validated is not None and self._providers is not None:
-                active = self._providers.tracer.start_span(name, attributes=validated)
+                parent = self._current.get()
+                context = (
+                    set_span_in_context(parent, Context()) if parent else Context()
+                )
+                active = self._providers.tracer.start_span(
+                    name, context=context, attributes=validated
+                )
                 token = self._current.set(active)
         except Exception:
             warn("span_start_failed")
@@ -95,7 +112,9 @@ class Telemetry:
                     check = self._registry.validate(name, version, {"outcome": outcome})
                     if isinstance(check, dict):
                         active.set_attribute("outcome", outcome)
-                    active.set_status(Status(StatusCode.ERROR if failed else StatusCode.OK))
+                    active.set_status(
+                        Status(StatusCode.ERROR if failed else StatusCode.OK)
+                    )
                     active.end()
                 except Exception:
                     warn("span_end_failed")
@@ -115,14 +134,18 @@ class Telemetry:
                 validated["punt.signal"] = "event"
                 now = time.time_ns()
                 span = self._providers.tracer.start_span(
-                    name, attributes=validated, start_time=now
+                    name, context=Context(), attributes=validated, start_time=now
                 )
                 span.end(end_time=now)
         except Exception:
             warn("event_failed")
 
     def _metric(
-        self, name: str, version: int, value: float, attrs: Mapping[str, object],
+        self,
+        name: str,
+        version: int,
+        value: float,
+        attrs: Mapping[str, object],
         kind: str,
     ) -> None:
         try:
@@ -140,15 +163,16 @@ class Telemetry:
                 instrument = self._instruments.get(key)
                 if instrument is None:
                     create = (
-                        self._providers.meter.create_counter if kind == "counter"
+                        self._providers.meter.create_counter
+                        if kind == "counter"
                         else self._providers.meter.create_histogram
                     )
                     instrument = create(name, unit=schema.unit)
                     self._instruments[key] = instrument
             if kind == "counter":
-                instrument.add(value, validated)
+                cast(Any, instrument).add(value, validated)
             else:
-                instrument.record(value, validated)
+                cast(Any, instrument).record(value, validated)
         except Exception:
             warn("metric_failed")
 
@@ -197,7 +221,9 @@ class Telemetry:
                 warn("shutdown_failed")
 
         try:
-            worker = threading.Thread(target=finish, name="punt-observe-shutdown", daemon=True)
+            worker = threading.Thread(
+                target=finish, name="punt-observe-shutdown", daemon=True
+            )
             worker.start()
             worker.join(timeout=max(0, min(timeout_s, 30)))
         except Exception:
@@ -209,8 +235,10 @@ class NoopTelemetry(Telemetry):
 
 
 def open_telemetry(
-    tool: str, schemas: Sequence[SignalSchema] = (),
-    config: TelemetryConfig = TelemetryConfig(), *,
+    tool: str,
+    schemas: Sequence[SignalSchema] = (),
+    config: TelemetryConfig = _DEFAULT_CONFIG,
+    *,
     exporter_factory: ExporterFactory | None = None,
 ) -> Telemetry:
     """Open failure-isolated capture, or a resource-free disabled facade."""
