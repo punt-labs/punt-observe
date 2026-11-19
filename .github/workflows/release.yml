@@ -88,7 +88,6 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           repository-url: https://test.pypi.org/legacy/
-          skip-existing: true
 
   install-verify:
     needs: testpypi
@@ -102,23 +101,46 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
-      - name: Install from TestPyPI
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - name: Install dependencies from PyPI
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          venv = str(Path(os.environ["RUNNER_TEMP"]) / "testpypi-venv")
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          dependencies = project["dependencies"] + project["optional-dependencies"]["otlp"]
+          subprocess.run(["uv", "venv", venv], check=True)
+          subprocess.run(
+              ["uv", "pip", "install", "--python", venv,
+               "--index-url", "https://pypi.org/simple/", *dependencies],
+              check=True,
+          )
+      - name: Download and hash-verify TestPyPI wheel
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          uv venv "$RUNNER_TEMP/testpypi-venv"
+          WHEEL="$(python -c 'from pathlib import Path; from smoke.gates import built_wheel; print(built_wheel(Path("dist")).resolve())')"
           for attempt in $(seq 1 10); do
-            echo "Attempt $attempt/10: installing punt-observe==$VERSION from TestPyPI..."
-            if uv pip install --python "$RUNNER_TEMP/testpypi-venv" --refresh \
-              --index-url https://test.pypi.org/simple/ \
-              --extra-index-url https://pypi.org/simple/ \
-              --index-strategy unsafe-best-match \
-              "punt-observe[otlp]==$VERSION"; then
+            echo "Attempt $attempt/10: verifying punt-observe==$VERSION from TestPyPI..."
+            if python smoke/verify_release.py "$WHEEL" "$VERSION" \
+              "$RUNNER_TEMP/testpypi-download"; then
               exit 0
             fi
             if [ "$attempt" -lt 10 ]; then sleep 60; fi
           done
-          echo "::error::Failed to install punt-observe==$VERSION from TestPyPI after 10 attempts"
+          echo "::error::Failed to verify punt-observe==$VERSION from TestPyPI after 10 attempts"
           exit 1
+      - name: Install only the verified TestPyPI wheel
+        run: |
+          WHEEL="$(python -c 'import os; from pathlib import Path; from smoke.gates import built_wheel; print(built_wheel(Path(os.environ["RUNNER_TEMP"]) / "testpypi-download").resolve())')"
+          uv pip install --python "$RUNNER_TEMP/testpypi-venv" \
+            --no-deps --reinstall --no-cache "$WHEEL"
       - name: Verify installed version and telemetry
         run: |
           "$RUNNER_TEMP/testpypi-venv/bin/python" -c \
