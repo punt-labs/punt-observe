@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import multiprocessing
 import os
 import sqlite3
@@ -9,10 +10,13 @@ from multiprocessing.connection import Connection
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from punt_observe._private_fs import PrivatePaths
 from punt_observe.logging.redactor import LogRedactor
+from punt_observe.telemetry import TelemetryConfig, open_telemetry
 from punt_observe.telemetry.sqlite_exporter import SQLiteStore
+from tests.test_telemetry import SCHEMAS, CapturingMetricExporter
 
 
 @pytest.mark.parametrize(
@@ -80,3 +84,38 @@ def test_incremental_vacuum_reclaims_entire_freelist(tmp_path: Path) -> None:
     finally:
         conn.close()
         store.close()
+
+
+def test_deferred_task_event_outlives_its_inherited_span() -> None:
+    spans = InMemorySpanExporter()
+    telemetry = open_telemetry(
+        "test",
+        SCHEMAS,
+        TelemetryConfig(
+            exporter="otlp",
+            otlp_consent=True,
+            otlp_endpoint="http://unused",
+            exporter_factory=lambda _: (spans, CapturingMetricExporter()),
+        ),
+    )
+
+    async def scenario() -> None:
+        ready = asyncio.Event()
+
+        async def deferred() -> None:
+            await ready.wait()
+            telemetry.event("test.cli.used", 1)
+
+        with telemetry.span("test.cli.run", 1):
+            task = asyncio.create_task(deferred())
+        ready.set()
+        await task
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        telemetry.shutdown(5)
+    exported = spans.get_finished_spans()
+    assert [span.name for span in exported] == ["test.cli.run", "test.cli.used"]
+    assert exported[1].parent is None
+    assert exported[1].start_time == exported[1].end_time

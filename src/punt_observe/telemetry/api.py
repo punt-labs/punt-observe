@@ -128,7 +128,7 @@ class Telemetry:
             if validated is None or self._providers is None:
                 return
             current = self._current.get()
-            if current is not None:
+            if current is not None and current.is_recording():
                 current.add_event(name, validated)
             else:
                 validated["punt.signal"] = "event"
