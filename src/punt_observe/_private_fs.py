@@ -71,13 +71,15 @@ class PrivatePaths:
         Raises:
             OSError: Opening or tightening the file failed.
         """
-        fd = os.open(self._path, flags | os.O_NOFOLLOW, 0o600)
+        fd = os.open(self._path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 raise OSError("not a regular file")
             if info.st_uid != os.getuid():
                 raise PermissionError("file is not owned by the current user")
+            if not flags & os.O_NONBLOCK:
+                os.set_blocking(fd, True)
             if stat.S_IMODE(info.st_mode) != 0o600:
                 os.fchmod(fd, 0o600)
         except BaseException:
