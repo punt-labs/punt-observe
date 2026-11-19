@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Share one weak, live-instance fork registry for punt-observe and remove instances
+  at shutdown; OpenTelemetry's own per-instance fork callbacks remain unchanged.
 - Preserve SQLite shared-memory locks during concurrent telemetry export by
   securing sidecars only before connecting.
 - Keep active logs and rotated backups within the byte cap under concurrent

@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import math
-import os
 import threading
 import time
-import weakref
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -16,6 +14,7 @@ from opentelemetry.context import Context
 from opentelemetry.trace import Span, Status, StatusCode, set_span_in_context
 
 from punt_observe.telemetry._diagnostics import warn
+from punt_observe.telemetry._fork import register, unregister
 from punt_observe.telemetry.config import TelemetryConfig, resolve
 from punt_observe.telemetry.providers import ExporterFactory, Providers
 from punt_observe.telemetry.salt import hash_identifier
@@ -52,16 +51,13 @@ class Telemetry:
             effective = resolve(tool, config)
             if effective.enabled:
                 self._providers = Providers(tool, effective, exporter_factory)
-                reference = weakref.ref(self)
-
-                def after_fork() -> None:
-                    telemetry = reference()
-                    if telemetry is not None:
-                        telemetry._lock = threading.Lock()
-
-                os.register_at_fork(after_in_child=after_fork)
+                register(self)
         except Exception:
             warn("initialization_failed")
+
+    def reset_after_fork(self) -> None:
+        """Replace the facade lock inherited from the parent process."""
+        self._lock = threading.Lock()
 
     def _validate(
         self, name: str, version: int, attrs: Mapping[str, object], kind: str
@@ -220,6 +216,7 @@ class Telemetry:
         if self._stopped:
             return
         self._stopped = True
+        unregister(self)
         if self._providers is None:
             return
         providers = self._providers
