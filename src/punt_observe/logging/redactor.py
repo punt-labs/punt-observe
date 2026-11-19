@@ -6,6 +6,7 @@ Mask the URL secrets and control characters in a finished log line.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import ClassVar, final
 
 from punt_observe.logging.authority_mask import AuthorityMask
@@ -272,19 +273,19 @@ class LogRedactor:
 
         A ``)`` or ``]`` is prose when it closes nothing opened inside the URL.
         """
+        counts = Counter(url)
         end = len(url)
-        while end and cls._is_prose(url, end):
+        while end:
+            last = url[end - 1]
+            opener = cls._OPENERS.get(last)
+            if opener is not None:
+                if counts[last] <= counts[opener]:
+                    break
+            elif last not in ".,:;'":
+                break
+            counts[last] -= 1
             end -= 1
         return url[:end], url[end:]
-
-    @classmethod
-    def _is_prose(cls, url: str, end: int) -> bool:
-        """Return whether the character before *end* is prose after the URL."""
-        last = url[end - 1]
-        opener = cls._OPENERS.get(last)
-        if opener is None:
-            return last in ".,:;'"
-        return url.count(last, 0, end) > url.count(opener, 0, end)
 
     @classmethod
     def _log_form(cls, match: re.Match[str]) -> str:
