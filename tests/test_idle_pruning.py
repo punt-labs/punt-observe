@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import gc
 import logging
+import multiprocessing
 import sqlite3
 import threading
 import time
+import weakref
+from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import cast
 from unittest.mock import Mock
@@ -15,6 +19,7 @@ from opentelemetry.sdk.metrics.export import MetricExporter
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from punt_observe.telemetry import (
+    Telemetry,
     TelemetryConfig,
     _diagnostics,
     open_telemetry,
@@ -39,6 +44,71 @@ def local_capture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def pruning_threads() -> set[threading.Thread]:
     return {t for t in threading.enumerate() if t.name == "punt-observe-prune"}
+
+
+def _prune_in_child(
+    telemetry: Telemetry,
+    path: Path,
+    clock: list[int],
+    output: Connection,
+) -> None:
+    clock[0] += 2 * 86_400 * 1_000_000_000
+    workers = pruning_threads()
+    with sqlite3.connect(path) as connection:
+        deadline = time.monotonic() + 2
+        rows = 1
+        while rows and time.monotonic() < deadline:
+            rows = connection.execute("SELECT count(*) FROM spans").fetchone()[0]
+            threading.Event().wait(0.01)
+    telemetry.shutdown(0.5)
+    output.send((rows, len(workers), all(not t.is_alive() for t in workers)))
+    output.close()
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_forked_telemetry_prunes_idle_rows_and_stops_child_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, closed: bool
+) -> None:
+    clock = [time.time_ns()]
+    monkeypatch.setattr(time, "time_ns", lambda: clock[0])
+    path = tmp_path / ".punt-labs/test/telemetry.db"
+    seed = SQLiteStore(path, 1, {})
+    assert seed.write(
+        "INSERT INTO spans (end_ns, attributes) VALUES (?, ?)", [(clock[0], "{}")]
+    )
+    seed.close()
+    monkeypatch.setattr(providers, "_PRUNE_INTERVAL_S", 3600)
+    telemetry = open_telemetry("test", [], TelemetryConfig(retention_days=1))
+    if closed:
+        telemetry.shutdown()
+    monkeypatch.setattr(providers, "_PRUNE_INTERVAL_S", 0.01)
+    parent, child = multiprocessing.Pipe()
+    process = multiprocessing.get_context("fork").Process(
+        target=_prune_in_child, args=(telemetry, path, clock, child)
+    )
+    try:
+        process.start()
+        process.join(5)
+        assert not process.is_alive(), "child shutdown waited on inherited workers"
+        assert process.exitcode == 0
+        assert parent.poll(1)
+        assert parent.recv() == (int(closed), int(not closed), True)
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        telemetry.shutdown()
+        parent.close()
+        child.close()
+
+
+def test_fork_hook_does_not_keep_providers_alive() -> None:
+    bundle = providers.Providers("test", TelemetryConfig())
+    reference = weakref.ref(bundle)
+    bundle.shutdown()
+    del bundle
+    gc.collect()
+    assert reference() is None
 
 
 def test_idle_retention_prunes_and_reclaims_without_signals(

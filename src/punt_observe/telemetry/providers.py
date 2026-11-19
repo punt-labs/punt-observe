@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import weakref
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -90,6 +92,7 @@ class Providers:
     ) -> None:
         self.store: SQLiteStore | None = None
         self._pruner: PeriodicPruner | None = None
+        self._pruning_stopped = False
         resource_attrs: dict[str, str | int] = {"service.name": tool, "punt.schema": 1}
         resource = _PrivateResource(resource_attrs)
         selected: tuple[SpanExporter, MetricExporter] | None = None
@@ -131,9 +134,26 @@ class Providers:
         self.meter = self.metrics.get_meter("punt_observe", "1")
         if self.store is not None:
             self._pruner = PeriodicPruner(self.store, _PRUNE_INTERVAL_S)
+            reference = weakref.ref(self)
+
+            def after_fork() -> None:
+                bundle = reference()
+                if bundle is not None:
+                    bundle._restart_pruning()
+
+            os.register_at_fork(after_in_child=after_fork)
+
+    def _restart_pruning(self) -> None:
+        self._pruner = None
+        if self.store is not None and not self._pruning_stopped:
+            try:
+                self._pruner = PeriodicPruner(self.store, _PRUNE_INTERVAL_S)
+            except Exception:
+                warn("sqlite_prune_failed")
 
     def stop_pruning(self) -> None:
         """Cancel scheduled retention without blocking provider shutdown."""
+        self._pruning_stopped = True
         if self._pruner is not None:
             self._pruner.stop()
 
