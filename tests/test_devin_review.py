@@ -14,13 +14,15 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from opentelemetry.sdk.metrics.export import MetricExportResult
+from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, use_span
 
 from punt_observe._private_fs import PrivatePaths
 from punt_observe.logging import configure_logging
 from punt_observe.logging.redactor import LogRedactor
-from punt_observe.telemetry import Telemetry, TelemetryConfig, open_telemetry
+from punt_observe.telemetry import Telemetry, TelemetryConfig, open_telemetry, otlp
 from punt_observe.telemetry.sqlite_exporter import SQLiteStore
 from tests.test_telemetry import SCHEMAS, CapturingMetricExporter
 
@@ -326,3 +328,46 @@ def test_otlp_export_does_not_inherit_host_exporter_environment(
         assert item["verify"] is True
         assert item["cert"] is None
         assert not item["data"].startswith(b"\x1f\x8b")
+
+
+@pytest.mark.parametrize("status", [307, 308])
+def test_otlp_redirects_are_failures_not_silent_success(status: int) -> None:
+    pytest.importorskip("opentelemetry.exporter.otlp.proto.http.trace_exporter")
+    requests = importlib.import_module("requests")
+    calls: list[str] = []
+
+    def redirect(session: Any, method: str, url: str, **kwargs: Any) -> Any:
+        assert kwargs["allow_redirects"] is False
+        calls.append(url)
+        response = requests.Response()
+        response.status_code, response._content = status, b""
+        response.headers["Location"] = "https://other.invalid"
+        return response
+
+    spans = InMemorySpanExporter()
+    metrics = CapturingMetricExporter()
+    telemetry = open_telemetry(
+        "test",
+        SCHEMAS,
+        TelemetryConfig(
+            exporter="otlp",
+            otlp_consent=True,
+            otlp_endpoint="http://unused",
+            exporter_factory=lambda _: (spans, metrics),
+        ),
+    )
+    with telemetry.span("test.cli.run", 1):
+        pass
+    telemetry.count("test.cli.calls", 1)
+    telemetry.shutdown(5)
+    with patch.object(requests.Session, "request", redirect):
+        traces, metric_exporter = otlp.exporters("https://collector.invalid")
+        try:
+            assert traces.export(spans.get_finished_spans()) == SpanExportResult.FAILURE
+            assert (
+                metric_exporter.export(metrics.batches[0]) == MetricExportResult.FAILURE
+            )
+        finally:
+            traces.shutdown()
+            metric_exporter.shutdown()
+    assert len(calls) == 2

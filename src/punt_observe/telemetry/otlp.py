@@ -27,7 +27,12 @@ class _PrivateSession:
             allow_redirects=False,
             timeout=2,
         )
-        return self._session.request(method, url, **kwargs)
+        response = self._session.request(method, url, **kwargs)
+        if 300 <= response.status_code < 400:
+            response.status_code = 400
+            response.reason = "OTLP redirect refused"
+            response._content = b""
+        return response
 
     def post(self, url: str, **kwargs: Any) -> Any:
         """Support SDK versions that send directly through Session.post."""
