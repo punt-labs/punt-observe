@@ -53,10 +53,23 @@ def test_slash_prefixed_credentials_cannot_expose_password_prefix() -> None:
     assert "PASS_SECRET" not in shown
 
 
-def test_single_quoted_url_stops_before_the_next_field() -> None:
-    assert (
-        LogRedactor.settle("'https://h/p'next=1") == "'https://h/…(segments=1)'next=1"
-    )
+def test_single_quoted_url_conservatively_masks_an_adjacent_field() -> None:
+    assert LogRedactor.settle("'https://h/p'next=1") == "'https://h/…(segments=1)"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "'https://h/o'brien?token=x'",
+        "'https://h/p?token=o'brien'",
+        "'https://h/p#o'brien'",
+    ],
+)
+def test_quoted_url_apostrophes_cannot_expose_a_sensitive_suffix(text: str) -> None:
+    shown = LogRedactor.settle(text)
+    assert shown is not None
+    assert "brien" not in shown
+    assert "token=" not in shown
 
 
 def _open_fifo(path: Path, connection: Connection) -> None:
