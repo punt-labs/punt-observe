@@ -1,5 +1,65 @@
 # Installed-artifact results
 
+## Enforced publish-gate rerun
+
+The original observations below are historical evidence. The rerun now uses
+fail-closed checks: a violation prints its check name and exits nonzero. All 12
+Qodo findings are covered by the gate implementation and mutation tests in
+`tests/test_smoke_gates.py` (132 targeted cases). No adopter or package production
+code was changed on this branch.
+
+`make smoke SMOKE_VENV=/home/ubuntu/work/telemetry-smoke/gate-venv
+SMOKE_OUTPUT=/home/ubuntu/work/telemetry-smoke/gate-package-results` exited **0**.
+All package verdicts passed, including live db/WAL/SHM/salt/log/directory modes,
+the positive URL redaction probe, actual decoded OTLP span/counter/histogram
+names, every fork child exit, and retention reclamation. The idle run seeded
+128 rows, retained zero, reclaimed the freelist to zero and reduced pages
+282 to 10. The fork returned `[0,0,0]`. All five eight-process rounds passed.
+Timing was 84.06 ms import and 7.01 ms open/shutdown. Builds now select only the
+one wheel produced in a fresh build directory, ignoring any stale `dist/` files.
+
+After fetching each adopter's main, each command below was run separately:
+`python smoke/run_tools.py /home/ubuntu/work/telemetry-smoke <repo>`.
+The tool runner includes required daemon/MCP flights for Lux and Quarry.
+
+| Tool | Fetched main | Exit | Enforced result |
+| --- | --- | --- | --- |
+| punt-kit | `d7916b7` | **0** | Baseline 1 span; concurrent 6 spans; both off checks and redaction pass |
+| z-spec | `7c7c15a` | **0** | Baseline 1 span; concurrent 6 spans; typed `spec_not_found` MCP signal; off/redaction pass |
+| lux | `1fae271` | **1** | Real HTTP MCP succeeds and all six concurrent renders exit 0, but short-stop stores **0 metric points** |
+| biff | `ce22bbc` | **0** | Baseline 1 span; concurrent 6 spans; typed successful `finger` MCP signal; off/redaction pass |
+| quarry | `654ba8c` | **0** | Real ONNX-backed daemon stores 8 search spans (7 CLI plus 1 MCP); off/redaction pass |
+| vox | `503a6b9` | **0** | Baseline 1 span; concurrent 6 spans; typed invalid-mode MCP signal; off/redaction pass |
+
+All installed punt-observe Git origins were verified as
+`53e657555cab240795c850ea7f0e4dd77a8d98fc`. Lux's earlier local fix build was
+removed from its isolated venv before this rerun. Biff and Vox snapshots were
+updated to the newly fetched mains. Biff initially failed to import after a
+no-dependencies reinstall retained the older MCP SDK; syncing its committed lock
+with `uv sync --locked --no-dev --no-editable` installed the required MCP 2.3 /
+FastMCP 4.2 and the complete Biff flight then exited 0.
+
+Lux now reports the actual blocker rather than silently recording it:
+
+```text
+FAIL lux: lux: daemon gate failed: FAIL lux: lux/daemon: missing stored metric points after short-stop
+```
+
+Both fresh Lux off-switch daemons pass (no db, identical successful CLI output).
+Both fresh Quarry off-switch daemons pass too. Lux has no expected-failure
+exemption: the publish gate remains blocked until the adopter shutdown loss is
+resolved. Private diagnostic/store modes are enforced; the previously noted
+product-owned state directories are outside that boundary and remain unchanged.
+
+Latest external evidence: `gate-package-results/package.json`,
+`tool-results/gate-exits.json`, `tool-results/*-gate-exit.json`,
+`tool-results/*-daemon-*.json`, and `tool-results/provenance.json` under
+`/home/ubuntu/work/telemetry-smoke/`. Protocol transcripts intentionally preserve
+the synthetic tool argument in client results; the private database and
+diagnostic logs must not contain it.
+
+## Original observational flight
+
 Linux, Python 3.13.18. Package base: `7a9b0545c1f0fec1039c948017b19ecb7ec4aa21`.
 No production fixes were made. Evidence root on the execution machine:
 `/home/ubuntu/work/telemetry-smoke/` (`package-results/`, `tool-results/`, and

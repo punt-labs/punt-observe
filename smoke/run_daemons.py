@@ -10,7 +10,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from functools import partial
 
+from gates import daemon_checks, verdict
 from http_mcp import call as http_mcp
 from inspect_store import inspect
 from run_tools import (
@@ -82,7 +84,7 @@ def flight(
                 if repo == "lux":
                     try:
                         result["http_mcp"] = http_mcp(port, SECRET)
-                    except (OSError, ValueError) as exc:
+                    except (OSError, ValueError, RuntimeError) as exc:
                         result["http_mcp_error"] = str(exc)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
                     result["concurrent"] = list(
@@ -129,13 +131,23 @@ def flight(
 
 
 if __name__ == "__main__":
+    failed = False
     selected = [r for r in sys.argv[2:] if r != "--wait-for-export"]
     for repo in selected or ("lux", "quarry"):
         baseline = flight(repo, wait_for_export="--wait-for-export" in sys.argv)
+        baseline.update(verdict(partial(daemon_checks, baseline, repo)))
+        (OUTPUT / (repo + "-daemon-on.json")).write_text(
+            json.dumps(baseline, indent=2) + "\n"
+        )
+        if not baseline["pass"]:
+            failed = True
+            sys.stderr.write(f"FAIL {repo}: {baseline['failure']}\n")
         sys.stdout.write(
             json.dumps(
                 {
                     "repo": repo,
+                    "pass": baseline["pass"],
+                    "failure": baseline.get("failure"),
                     "startup_error": baseline.get("startup_error"),
                     "cli": baseline.get("cli"),
                     "counts": baseline["store"].get("counts"),
@@ -151,10 +163,19 @@ if __name__ == "__main__":
         if "startup_error" not in baseline and "--wait-for-export" not in sys.argv:
             for switch in ("PUNT_TELEMETRY", repo.upper() + "_TELEMETRY"):
                 off = flight(repo, switch)
+                off.update(verdict(partial(daemon_checks, off, repo, baseline)))
+                (OUTPUT / (repo + "-daemon-" + switch + ".json")).write_text(
+                    json.dumps(off, indent=2) + "\n"
+                )
+                if not off["pass"]:
+                    failed = True
+                    sys.stderr.write(f"FAIL {repo}/{switch}: {off['failure']}\n")
                 sys.stdout.write(
                     json.dumps(
                         {
                             "repo": repo,
+                            "pass": off["pass"],
+                            "failure": off.get("failure"),
                             "switch": switch,
                             "db_exists": off["store"]["db_exists"],
                             "same_cli_output": off.get("cli") == baseline.get("cli"),
@@ -163,3 +184,4 @@ if __name__ == "__main__":
                     + "\n"
                 )
                 sys.stdout.flush()
+    sys.exit(int(failed))

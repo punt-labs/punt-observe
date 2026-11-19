@@ -9,7 +9,7 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
-SECRET = b"SMOKE-SECRET-4242"
+SECRETS = (b"SMOKE-SECRET-4242", b"/home/ubuntu/private/path", b"SMOKE-PRIVATE")
 
 
 def inspect(home: Path, tool: str) -> dict[str, object]:
@@ -38,6 +38,12 @@ def inspect(home: Path, tool: str) -> dict[str, object]:
                     "SELECT name, attributes FROM spans ORDER BY name LIMIT 20"
                 )
             ]
+            result["metrics"] = [
+                list(r)
+                for r in conn.execute(
+                    "SELECT name, count, attributes FROM metric_points"
+                )
+            ]
             result["integrity"] = conn.execute("PRAGMA integrity_check").fetchone()[0]
             result["journal_mode"] = conn.execute("PRAGMA journal_mode").fetchone()[0]
             result["user_version"] = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -51,16 +57,21 @@ def inspect(home: Path, tool: str) -> dict[str, object]:
             result["secret_hits"] = [
                 str(p.relative_to(home))
                 for p in root.rglob("*")
-                if p.is_file() and SECRET in p.read_bytes()
+                if p.is_file() and any(secret in p.read_bytes() for secret in SECRETS)
             ]
     result["modes"] = {
-        str(p.relative_to(home)): oct(stat.S_IMODE(p.stat().st_mode))
-        for p in [root, *root.rglob("*")]
-        if p.exists() and (p.is_file() or p.is_dir())
+        **result.get("modes", {}),
+        **{
+            str(p.relative_to(home)): oct(stat.S_IMODE(p.stat().st_mode))
+            for p in [root, *root.rglob("*")]
+            if p.exists() and (p.is_file() or p.is_dir())
+        },
     }
     logs = list(root.glob(f"{tool}/logs/*.log"))
     result["logs"] = {p.name: p.read_text(errors="replace")[-4000:] for p in logs}
-    result["log_secret_hits"] = [p.name for p in logs if SECRET in p.read_bytes()]
+    result["log_secret_hits"] = [
+        p.name for p in logs if any(secret in p.read_bytes() for secret in SECRETS)
+    ]
     return result
 
 

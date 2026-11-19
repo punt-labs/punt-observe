@@ -8,6 +8,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from evidence import save
+
 root = Path(sys.argv[1]).resolve()
 repos = Path(sys.argv[2]).resolve()
 result = {}
@@ -42,7 +44,5 @@ for repo in ("punt-kit", "z-spec", "lux", "biff", "quarry", "vox"):
         "lock": locked,
         "installed": json.loads(installed),
     }
-(root / "tool-results" / "provenance.json").write_text(
-    json.dumps(result, indent=2) + "\n"
-)
+save(root / "tool-results" / "provenance.json", result)
 sys.stdout.write(json.dumps(result, indent=2) + "\n")

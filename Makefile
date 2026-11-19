@@ -29,9 +29,8 @@ build: ## Build and validate wheel and sdist
 	uvx twine check dist/*
 
 smoke: ## Build and smoke an installed wheel outside the checkout (includes OTLP)
-	uv build
 	uv venv --allow-existing "$(SMOKE_VENV)"
-	uv pip install --python "$(SMOKE_VENV)" ./dist/punt_observe-*.whl
+	uv run python smoke/install_wheel.py "$(SMOKE_VENV)"
 	uv pip install --python "$(SMOKE_VENV)" 'opentelemetry-exporter-otlp-proto-http>=1.39,<2'
 	"$(SMOKE_VENV)/bin/python" smoke/run_package.py "$(SMOKE_OUTPUT)"
 

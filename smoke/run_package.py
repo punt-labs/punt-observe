@@ -9,8 +9,17 @@ import subprocess
 import sys
 import tempfile
 import time
+from functools import partial
 from pathlib import Path
 
+from gates import (
+    execution_data,
+    otlp,
+    package_case,
+    package_concurrency,
+    package_off,
+    verdict,
+)
 from inspect_store import inspect
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -61,19 +70,8 @@ for mode in ("emit", "invalid", "fork", "idle"):
     home = fresh(mode)
     execution = run(mode, home)
     store = inspect(home, "smoketool")
-    counts = store.get("counts", {})
-    expected = {"meta": 1, "spans": 1, "span_events": 1, "metric_points": 2}
-    if mode == "invalid":
-        expected.update(spans=0, span_events=0, metric_points=0)
-    elif mode == "fork":
-        expected.update(spans=4, span_events=4, metric_points=8)
-    elif mode == "idle":
-        expected.update(spans=0, span_events=0, metric_points=0)
     report[mode] = {
-        "pass": execution["exit"] == 0
-        and counts == expected
-        and store.get("integrity") == "ok"
-        and not store.get("secret_hits"),
+        **verdict(partial(package_case, mode, execution, store)),
         "home": str(home),
         "execution": execution,
         "store": store,
@@ -87,12 +85,9 @@ for mode, extra in (
 ):
     home = fresh("off")
     execution = run(mode, home, extra)
-    data = json.loads(execution.get("stdout", "{}"))
     report["off"].append(
         {
-            "pass": execution["exit"] == 0
-            and not data.get("db_exists", True)
-            and data.get("extra_threads_before_shutdown") == [],
+            **verdict(partial(package_off, execution)),
             "switch": extra or "enabled=False",
             "execution": execution,
         }
@@ -107,10 +102,7 @@ for index in range(5):
     rounds.append(
         {
             "round": index + 1,
-            "pass": all(e["exit"] == 0 for e in executions)
-            and store.get("counts")
-            == {"meta": 1, "spans": 8, "span_events": 8, "metric_points": 16}
-            and store.get("integrity") == "ok",
+            **verdict(partial(package_concurrency, executions, store)),
             "executions": executions,
             "store": store,
         }
@@ -118,17 +110,9 @@ for index in range(5):
 report["concurrency"] = rounds
 home = fresh("otlp")
 execution = run("otlp", home)
-data = json.loads(execution.get("stdout", "{}"))
-requests = data.get("requests", [])
 report["otlp"] = {
-    "pass": execution["exit"] == 0
-    and not data.get("db_exists", True)
-    and {r["path"] for r in requests} == {"/v1/traces", "/v1/metrics"}
-    and all(
-        "x-smoke-secret" not in {k.lower() for k in r["headers"]} for r in requests
-    ),
+    **verdict(lambda: otlp(execution)),
     "execution": execution,
-    "data": data,
 }
 timing = subprocess.run(
     [
@@ -148,7 +132,13 @@ timing = subprocess.run(
     text=True,
     timeout=20,
 )
-report["timing"] = json.loads(timing.stdout)
+report["timing"] = verdict(
+    lambda: execution_data(
+        {"exit": timing.returncode, "stdout": timing.stdout}, "timing"
+    )
+)
+if report["timing"]["pass"]:
+    report["timing"].update(json.loads(timing.stdout))
 (OUTPUT / "package.json").write_text(json.dumps(report, indent=2) + "\n")
 sys.stdout.write(
     json.dumps(
@@ -160,6 +150,10 @@ sys.stdout.write(
     )
     + "\n"
 )
+for key, value in report.items():
+    for check in value if isinstance(value, list) else [value]:
+        if not check["pass"]:
+            sys.stderr.write(f"FAIL {key}: {check['failure']}\n")
 sys.exit(
     int(
         not all(

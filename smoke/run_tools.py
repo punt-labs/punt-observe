@@ -12,6 +12,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from gates import mcp_exchange, rpc_result, tool_checks, verdict
 from inspect_store import inspect
 
 ROOT = Path(sys.argv[1]).resolve()
@@ -59,10 +60,12 @@ def environment(home: Path, repo: str) -> dict[str, str]:
     }
 
 
-def invoke(command: list[str], env: dict[str, str], cwd: Path) -> dict:
+def invoke(
+    command: list[str], env: dict[str, str], cwd: Path, timeout: int = 45
+) -> dict:
     try:
         p = subprocess.run(
-            command, env=env, cwd=cwd, capture_output=True, text=True, timeout=45
+            command, env=env, cwd=cwd, capture_output=True, text=True, timeout=timeout
         )
         return {"exit": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
     except subprocess.TimeoutExpired:
@@ -111,6 +114,7 @@ def stdio(
                         continue
                     transcript.append({"receive": message})
                     if message.get("id") == request_id:
+                        rpc_result(message, request_id, "stdio/mcp")
                         return message
                 if poll.select(max(0, deadline - time.monotonic())):
                     chunk = os.read(p.stdout.fileno(), 65536)
@@ -147,6 +151,14 @@ def stdio(
                 }
             )
             result["call"] = receive(3)
+            repo = {
+                "check": "z-spec",
+                "finger": "biff",
+                "scene_show": "lux",
+                "find": "quarry",
+                "speak": "vox",
+            }[call[0]]
+            mcp_exchange(result, repo, call[0])
         except (TimeoutError, RuntimeError, BrokenPipeError) as exc:
             result["error"] = str(exc)
         finally:
@@ -251,7 +263,7 @@ def flight(repo: str) -> dict:
         "store": inspect(concurrent_home, tool),
         "home": str(concurrent_home),
     }
-    if call is not None:
+    if call is not None and repo != "quarry":
         mcp_home = fresh(repo + "-mcp")
         if repo in ("z-spec", "biff"):
             result["mcp_setup"] = invoke(
@@ -275,11 +287,26 @@ def flight(repo: str) -> dict:
         }
     else:
         result["mcp"] = {
-            "note": "no stdio entry point (lux serves HTTP; punt-kit has no server)"
+            "note": "quarry MCP is required by the daemon flight; punt-kit has no MCP"
         }
+    if repo in ("lux", "quarry"):
+        result["daemon"] = invoke(
+            [
+                sys.executable,
+                str(Path(__file__).with_name("run_daemons.py")),
+                str(ROOT),
+                repo,
+            ],
+            os.environ.copy(),
+            cwd,
+            timeout=180,
+        )
+    result.update(verdict(lambda: tool_checks(result, repo)))
     (OUTPUT / (repo + ".json")).write_text(json.dumps(result, indent=2) + "\n")
     return {
         "repo": repo,
+        "pass": result["pass"],
+        "failure": result.get("failure"),
         "cli_exit": baseline["exit"],
         "counts": result["store"].get("counts"),
         "off": [
@@ -291,7 +318,12 @@ def flight(repo: str) -> dict:
 
 
 if __name__ == "__main__":
+    failed = False
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
         for summary in executor.map(flight, sys.argv[2:] or TOOLS):
             sys.stdout.write(json.dumps(summary) + "\n")
             sys.stdout.flush()
+            if not summary["pass"]:
+                failed = True
+                sys.stderr.write(f"FAIL {summary['repo']}: {summary['failure']}\n")
+    sys.exit(int(failed))

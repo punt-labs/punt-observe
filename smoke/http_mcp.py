@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import urllib.request
 
+from gates import http_exchange
+
 
 def call(port: int, secret: str) -> list[dict]:
     transcript = []
@@ -53,4 +55,5 @@ def call(port: int, secret: str) -> list[dict]:
                     "body": body,
                 }
             )
+    http_exchange(transcript)
     return transcript
