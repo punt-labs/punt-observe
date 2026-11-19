@@ -10,13 +10,13 @@ from contextlib import suppress
 
 logger = logging.getLogger("punt_observe.telemetry")
 _lock = threading.Lock()
-_last = 0.0
+_last = float("-inf")
 
 
 def _after_fork() -> None:
     global _lock, _last
     _lock = threading.Lock()
-    _last = 0.0
+    _last = float("-inf")
 
 
 os.register_at_fork(after_in_child=_after_fork)

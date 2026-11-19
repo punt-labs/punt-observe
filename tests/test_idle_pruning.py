@@ -13,6 +13,7 @@ import weakref
 from collections.abc import Callable
 from multiprocessing.connection import Connection
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock
 
@@ -345,9 +346,9 @@ def test_prune_failure_is_rate_limited_private_and_does_not_stop_scheduler(
         original(store)
         recovered.set()
 
-    monkeypatch.setattr(_diagnostics, "_last", 0)
-    monkeypatch.setattr(SQLiteStore, "prune", flaky)
+    monkeypatch.setattr(_diagnostics, "_last", float("-inf"))
     caplog.set_level(logging.WARNING, logger="punt_observe.telemetry")
+    monkeypatch.setattr(SQLiteStore, "prune", flaky)
     try:
         assert recovered.wait(2)
         messages = [
@@ -357,6 +358,20 @@ def test_prune_failure_is_rate_limited_private_and_does_not_stop_scheduler(
         assert "SECRET_CONTENT" not in caplog.text
     finally:
         telemetry.shutdown()
+
+
+def test_first_diagnostic_is_emitted_during_first_minute_after_boot(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(_diagnostics, "time", SimpleNamespace(monotonic=lambda: 30.0))
+    monkeypatch.setattr(_diagnostics, "_last", 0)
+    cast(Any, _diagnostics)._after_fork()
+    caplog.set_level(logging.WARNING, logger="punt_observe.telemetry")
+    _diagnostics.warn("sqlite_prune_failed")
+    _diagnostics.warn("sqlite_prune_failed")
+    assert [r.getMessage() for r in caplog.records] == [
+        "Telemetry dropped: sqlite_prune_failed"
+    ]
 
 
 def test_shutdown_wait_is_bounded_even_during_stuck_maintenance(
