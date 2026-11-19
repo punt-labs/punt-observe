@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import logging
 import multiprocessing
+import os
 import sqlite3
 import threading
 import time
@@ -24,6 +25,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from punt_observe.telemetry import (
+    SignalSchema,
     Telemetry,
     TelemetryConfig,
     _diagnostics,
@@ -114,6 +116,113 @@ def test_fork_hook_does_not_keep_providers_alive() -> None:
     del bundle
     gc.collect()
     assert reference() is None
+
+
+def _use_forked_store(
+    telemetry: Telemetry,
+    store: SQLiteStore,
+    inherited_connection: sqlite3.Connection,
+    clock: list[int],
+    output: Connection,
+) -> None:
+    clock[0] += 2 * 86_400 * 1_000_000_000
+    deadline = time.monotonic() + 2
+    with sqlite3.connect(store.path) as connection:
+        rows = 1
+        while rows and time.monotonic() < deadline:
+            rows = connection.execute("SELECT count(*) FROM spans").fetchone()[0]
+            threading.Event().wait(0.01)
+    telemetry.event("test.fork.event", 1)
+    telemetry.count("test.fork.count", 1)
+    _diagnostics.warn("fork_test")
+    workers = pruning_threads()
+    telemetry.shutdown(0.5)
+    output.send(
+        (
+            rows,
+            cast(Any, store)._conn is not inherited_connection,
+            all(not worker.is_alive() for worker in workers),
+        )
+    )
+    output.close()
+
+
+def test_fork_while_pruner_holds_store_lock_uses_fresh_child_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [time.time_ns()]
+    monkeypatch.setattr(time, "time_ns", lambda: clock[0])
+    telemetry = open_telemetry(
+        "test",
+        [
+            SignalSchema("test.fork.event", 1, "event", {}),
+            SignalSchema("test.fork.count", 1, "counter", {}),
+        ],
+        TelemetryConfig(retention_days=1),
+    )
+    store = cast(SQLiteStore, cast(Any, telemetry)._providers.store)
+    assert store.write("INSERT INTO spans (end_ns) VALUES (?)", [(clock[0],)])
+    entered, release = threading.Event(), threading.Event()
+    original = SQLiteStore.prune
+    parent_pid = os.getpid()
+
+    def hold_lock(current: SQLiteStore) -> None:
+        if os.getpid() == parent_pid:
+            with (
+                cast(Any, current)._lock,
+                cast(Any, telemetry)._lock,
+                cast(Any, _diagnostics)._lock,
+            ):
+                entered.set()
+                release.wait(10)
+        original(current)
+
+    monkeypatch.setattr(SQLiteStore, "prune", hold_lock)
+    connect = sqlite3.connect
+    failed = False
+
+    def flaky_connect(
+        database: Path, timeout: float = 5, *, check_same_thread: bool = True
+    ) -> sqlite3.Connection:
+        nonlocal failed
+        if (
+            os.getpid() != parent_pid
+            and threading.current_thread().name == "punt-observe-prune"
+            and not failed
+        ):
+            failed = True
+            raise sqlite3.OperationalError("transient child connection failure")
+        return connect(database, timeout=timeout, check_same_thread=check_same_thread)
+
+    monkeypatch.setattr(sqlite3, "connect", flaky_connect)
+    parent, child = multiprocessing.Pipe()
+    process = multiprocessing.get_context("fork").Process(
+        target=_use_forked_store,
+        args=(telemetry, store, cast(Any, store)._conn, clock, child),
+    )
+    try:
+        assert entered.wait(2)
+        process.start()
+        process.join(5)
+        assert not process.is_alive(), "child waited on the parent's store lock"
+        assert process.exitcode == 0
+        assert parent.poll(1)
+        assert parent.recv() == (0, True, True)
+        with sqlite3.connect(store.path) as connection:
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM spans WHERE name = 'test.fork.event'"
+                ).fetchone()[0]
+                == 1
+            )
+    finally:
+        release.set()
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        telemetry.shutdown()
+        parent.close()
+        child.close()
 
 
 def test_idle_retention_prunes_and_reclaims_without_signals(

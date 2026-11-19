@@ -182,6 +182,7 @@ class Providers:
         self._pruner = None
         if self.store is not None and not self._pruning_stopped:
             try:
+                self.store.reset_after_fork()
                 self._pruner = PeriodicPruner(self.store, _PRUNE_INTERVAL_S)
             except Exception:
                 warn("sqlite_prune_failed")

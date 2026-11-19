@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import math
+import os
 import threading
 import time
+import weakref
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -50,6 +52,14 @@ class Telemetry:
             effective = resolve(tool, config)
             if effective.enabled:
                 self._providers = Providers(tool, effective, exporter_factory)
+                reference = weakref.ref(self)
+
+                def after_fork() -> None:
+                    telemetry = reference()
+                    if telemetry is not None:
+                        telemetry._lock = threading.Lock()
+
+                os.register_at_fork(after_in_child=after_fork)
         except Exception:
             warn("initialization_failed")
 
