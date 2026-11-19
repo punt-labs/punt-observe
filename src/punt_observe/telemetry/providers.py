@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from typing import Any, cast
@@ -28,6 +26,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 from punt_observe._private_fs import PrivatePaths
 from punt_observe.telemetry import otlp
 from punt_observe.telemetry._diagnostics import warn
+from punt_observe.telemetry._fork import register, unregister
 from punt_observe.telemetry._pruning import PeriodicPruner
 from punt_observe.telemetry.config import TelemetryConfig
 from punt_observe.telemetry.sqlite_exporter import (
@@ -168,17 +167,12 @@ class Providers:
                 self._pruner = PeriodicPruner(self.store, _PRUNE_INTERVAL_S)
                 cleanup.callback(_cleanup_failed_setup, self._pruner.join)
                 cleanup.callback(self.stop_pruning)
-                reference = weakref.ref(self)
-
-                def after_fork() -> None:
-                    bundle = reference()
-                    if bundle is not None:
-                        bundle._restart_pruning()
-
-                os.register_at_fork(after_in_child=after_fork)
+                cleanup.callback(unregister, self)
+                register(self)
             cleanup.pop_all()
 
-    def _restart_pruning(self) -> None:
+    def reset_after_fork(self) -> None:
+        """Reset local storage and restart maintenance in the child process."""
         self._pruner = None
         if self.store is not None and not self._pruning_stopped:
             try:
@@ -190,6 +184,7 @@ class Providers:
     def stop_pruning(self) -> None:
         """Cancel scheduled retention without blocking provider shutdown."""
         self._pruning_stopped = True
+        unregister(self)
         if self._pruner is not None:
             self._pruner.stop()
 

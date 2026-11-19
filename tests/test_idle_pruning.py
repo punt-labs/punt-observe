@@ -365,7 +365,7 @@ def test_first_diagnostic_is_emitted_during_first_minute_after_boot(
 ) -> None:
     monkeypatch.setattr(_diagnostics, "time", SimpleNamespace(monotonic=lambda: 30.0))
     monkeypatch.setattr(_diagnostics, "_last", 0)
-    cast(Any, _diagnostics)._after_fork()
+    _diagnostics.reset_after_fork()
     caplog.set_level(logging.WARNING, logger="punt_observe.telemetry")
     _diagnostics.warn("sqlite_prune_failed")
     _diagnostics.warn("sqlite_prune_failed")
