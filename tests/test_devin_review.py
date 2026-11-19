@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import sqlite3
 from multiprocessing.connection import Connection
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 
 from punt_observe._private_fs import PrivatePaths
 from punt_observe.logging.redactor import LogRedactor
+from punt_observe.telemetry.sqlite_exporter import SQLiteStore
 
 
 @pytest.mark.parametrize(
@@ -62,3 +64,19 @@ def test_fifo_is_rejected_without_blocking(tmp_path: Path) -> None:
     finally:
         parent.close()
         child.close()
+
+
+def test_incremental_vacuum_reclaims_entire_freelist(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "vacuum.db", 90, {})
+    conn = sqlite3.connect(store.path)
+    try:
+        conn.execute("CREATE TABLE scratch (data BLOB)")
+        conn.execute("INSERT INTO scratch VALUES (zeroblob(2000000))")
+        conn.execute("DROP TABLE scratch")
+        conn.commit()
+        assert conn.execute("PRAGMA freelist_count").fetchone()[0] > 100
+        store.prune()
+        assert conn.execute("PRAGMA freelist_count").fetchone()[0] == 0
+    finally:
+        conn.close()
+        store.close()

@@ -95,7 +95,7 @@ class SQLiteStore:
             self._conn.execute("DELETE FROM span_events WHERE ts_ns < ?", (cutoff,))
             self._conn.execute("DELETE FROM metric_points WHERE ts_ns < ?", (cutoff,))
         with self._lock:
-            self._conn.execute("PRAGMA incremental_vacuum")
+            self._conn.execute("PRAGMA incremental_vacuum").fetchall()
             self._conn.commit()
             self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
             self._last_prune = time.monotonic()
