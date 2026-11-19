@@ -213,6 +213,7 @@ class Telemetry:
         if self._providers is None:
             return
         providers = self._providers
+        providers.stop_pruning()
 
         def finish() -> None:
             try:

@@ -25,6 +25,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 from punt_observe._private_fs import PrivatePaths
 from punt_observe.telemetry import otlp
 from punt_observe.telemetry._diagnostics import warn
+from punt_observe.telemetry._pruning import PeriodicPruner
 from punt_observe.telemetry.config import TelemetryConfig
 from punt_observe.telemetry.sqlite_exporter import (
     SQLiteMetricExporter,
@@ -33,6 +34,8 @@ from punt_observe.telemetry.sqlite_exporter import (
 )
 
 type ExporterFactory = Callable[[str], tuple[SpanExporter, MetricExporter]]
+
+_PRUNE_INTERVAL_S = 3600.0
 
 
 class _PrivateResource(Resource):
@@ -86,6 +89,7 @@ class Providers:
         exporter_factory: ExporterFactory | None = None,
     ) -> None:
         self.store: SQLiteStore | None = None
+        self._pruner: PeriodicPruner | None = None
         resource_attrs: dict[str, str | int] = {"service.name": tool, "punt.schema": 1}
         resource = _PrivateResource(resource_attrs)
         selected: tuple[SpanExporter, MetricExporter] | None = None
@@ -125,14 +129,24 @@ class Providers:
         )
         self.tracer = self.traces.get_tracer("punt_observe", "1")
         self.meter = self.metrics.get_meter("punt_observe", "1")
+        if self.store is not None:
+            self._pruner = PeriodicPruner(self.store, _PRUNE_INTERVAL_S)
+
+    def stop_pruning(self) -> None:
+        """Cancel scheduled retention without blocking provider shutdown."""
+        if self._pruner is not None:
+            self._pruner.stop()
 
     def shutdown(self) -> None:
         """Flush and stop providers, closing storage even if an exporter fails."""
+        self.stop_pruning()
         try:
             self.traces.shutdown()
         finally:
             try:
                 self.metrics.shutdown(timeout_millis=2000)
             finally:
+                if self._pruner is not None:
+                    self._pruner.join()
                 if self.store is not None:
                     self.store.close()
