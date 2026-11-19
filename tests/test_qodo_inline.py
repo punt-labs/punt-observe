@@ -136,3 +136,50 @@ def test_custom_paths_allow_a_resolved_trusted_temp_root(tmp_path: Path) -> None
         path = alias / "new" / "logs" / "out.log"
         AtomicAppendLog(path).append("safe")
     assert (target / "new" / "logs" / "out.log").read_text() == "safe\n"
+
+
+def test_append_retries_a_transient_leaf_create_lookup(tmp_path: Path) -> None:
+    path = tmp_path / "logs" / "out.log"
+    original_open = os.open
+    attempts = 0
+
+    def transient_open(name: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal attempts
+        if name == "out.log":
+            attempts += 1
+            if attempts == 1:
+                raise FileNotFoundError(2, "No such file or directory", name)
+        return original_open(name, flags, *args, **kwargs)
+
+    with patch("os.open", transient_open):
+        AtomicAppendLog(path).append("must survive")
+    assert path.read_text() == "must survive\n"
+    assert attempts == 2
+
+
+@pytest.mark.parametrize(
+    "flags, expected_attempts",
+    [
+        (os.O_RDONLY, 1),
+        (os.O_WRONLY | os.O_CREAT | os.O_EXCL, 1),
+        (os.O_WRONLY | os.O_CREAT, 2),
+    ],
+)
+def test_leaf_lookup_errors_keep_retries_bounded(
+    tmp_path: Path,
+    flags: int,
+    expected_attempts: int,
+) -> None:
+    original_open = os.open
+    attempts = 0
+
+    def missing_open(name: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal attempts
+        if name == "out.log":
+            attempts += 1
+            raise FileNotFoundError(2, "No such file or directory", name)
+        return original_open(name, flags, *args, **kwargs)
+
+    with patch("os.open", missing_open), pytest.raises(FileNotFoundError):
+        PrivatePaths(tmp_path / "out.log").open_private(flags)
+    assert attempts == expected_attempts

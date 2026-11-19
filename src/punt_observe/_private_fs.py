@@ -114,13 +114,14 @@ class PrivatePaths:
             OSError: Opening or tightening the file failed.
         """
         parent = self._directory_fd(self._path.parent, create=False)
+        open_flags = flags | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
-            fd = os.open(
-                self._path.name,
-                flags | os.O_NOFOLLOW | os.O_NONBLOCK,
-                0o600,
-                dir_fd=parent,
-            )
+            try:
+                fd = os.open(self._path.name, open_flags, 0o600, dir_fd=parent)
+            except FileNotFoundError:
+                if not flags & os.O_CREAT or flags & os.O_EXCL:
+                    raise
+                fd = os.open(self._path.name, open_flags, 0o600, dir_fd=parent)
         finally:
             os.close(parent)
         try:
