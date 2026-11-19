@@ -87,6 +87,19 @@ falls back to SQLite. Instrumentation stays identical.
 Providers are private, never process-global. Pending span export is bounded at
 2048; saturation drops records, not tool results. Shutdown bounds waiting; a
 misbehaving exporter may finish on a daemon thread after the deadline.
+`shutdown(timeout_s=2)` force-flushes pending metrics, spans and events without
+waiting for their periodic export interval. As a fallback, normal Python exit
+(including `sys.exit` or an uncaught `KeyboardInterrupt`) flushes pending live
+providers through one atexit registry, with a **two-second total** wait across
+all instances. Explicitly shut-down instances and forked children that have not
+emitted do no exit work. Explicit shutdown remains the preferred lifecycle.
+
+**The library never installs signal handlers.** A SIGTERM with its default
+disposition skips atexit, as do SIGKILL and `os._exit`. Daemons must convert
+SIGTERM into normal Python unwinding (for example, raise `SystemExit`), or call
+`shutdown` before terminating. A server that restores and re-raises default
+SIGTERM before an outer telemetry context unwinds still skips that context and
+atexit; move explicit shutdown into its graceful lifecycle instead.
 
 ## Development
 

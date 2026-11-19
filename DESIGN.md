@@ -48,7 +48,23 @@ physical line. Creation uses 0600, directory 0700, O_NOFOLLOW and fd tightening.
 BatchSpanProcessor bounds pending spans at 2048. Private metric readers bound
 export time; facade shutdown bounds its wait even for a misbehaving exporter.
 A timed-out exporter may finish on its daemon worker; it never stalls the tool.
-Shutdown cancels scheduled pruning immediately. In-flight maintenance is joined
+Shutdown explicitly force-flushes the metric reader and span processor before
+closing storage, sharing the caller's remaining time budget across flushes.
+After the first valid signal, a single process-wide atexit registry retains
+pending providers even if a main-local facade is collected. Each pending provider
+prestarts a daemon for exit cleanup: Python 3.13 cannot start threads at atexit.
+All exit daemons are requested together and share a total wait of at most two
+seconds, so a failing or stuck exporter cannot block other providers or exit.
+Explicit shutdown removes its exit work. The shared fork hook discards parent
+exit work and synchronization; child providers opt in only after a child signal.
+No signal handlers are installed. Default-disposition SIGTERM (including a server
+restoring and re-raising it), SIGKILL and os._exit bypass atexit. Daemons must
+translate SIGTERM into normal Python unwinding or explicitly shut down before
+re-raising the signal; atexit alone cannot make abrupt termination durable.
+Shutdown defers lock-taking cleanup to its daemon worker so a signal handler
+cannot synchronously re-enter a lock held by the interrupted thread. Diagnostic
+rate limiting uses a reentrant lock for the thread-start failure fallback.
+The shutdown worker cancels scheduled pruning before flushing. In-flight maintenance is joined
 by the bounded facade's shutdown worker before closing the shared store; a stuck
 maintenance pass may finish later on its daemon, without extending caller waits.
 OTLP is lazily imported and requires config consent; missing extra falls back local.

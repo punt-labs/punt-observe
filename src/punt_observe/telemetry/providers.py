@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Callable
 from contextlib import ExitStack
 from typing import Any, cast
@@ -26,6 +28,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 from punt_observe._private_fs import PrivatePaths
 from punt_observe.telemetry import otlp
 from punt_observe.telemetry._diagnostics import warn
+from punt_observe.telemetry._exit import ExitFlush
 from punt_observe.telemetry._fork import register, unregister
 from punt_observe.telemetry._pruning import PeriodicPruner
 from punt_observe.telemetry.config import TelemetryConfig
@@ -100,6 +103,9 @@ class Providers:
         self.store: SQLiteStore | None = None
         self._pruner: PeriodicPruner | None = None
         self._pruning_stopped = False
+        self._exit_lock = threading.Lock()
+        self._exit_flush: ExitFlush | None = None
+        self._shutdown_started = False
         with ExitStack() as cleanup:
             resource_attrs: dict[str, str | int] = {
                 "service.name": tool,
@@ -167,13 +173,22 @@ class Providers:
                 self._pruner = PeriodicPruner(self.store, _PRUNE_INTERVAL_S)
                 cleanup.callback(_cleanup_failed_setup, self._pruner.join)
                 cleanup.callback(self.stop_pruning)
-                cleanup.callback(unregister, self)
-                register(self)
+            cleanup.callback(unregister, self)
+            register(self)
             cleanup.pop_all()
+
+    def activate(self) -> None:
+        """Retain emitted data until explicit shutdown or bounded process exit."""
+        with self._exit_lock:
+            if self._exit_flush is None and not self._pruning_stopped:
+                self._exit_flush = ExitFlush(self.shutdown)
 
     def reset_after_fork(self) -> None:
         """Reset local storage and restart maintenance in the child process."""
         self._pruner = None
+        self._exit_lock = threading.Lock()
+        self._exit_flush = None
+        self._shutdown_started = False
         if self.store is not None and not self._pruning_stopped:
             try:
                 self.store.reset_after_fork()
@@ -185,17 +200,37 @@ class Providers:
         """Cancel scheduled retention without blocking provider shutdown."""
         self._pruning_stopped = True
         unregister(self)
+        with self._exit_lock:
+            if self._exit_flush is not None:
+                self._exit_flush.cancel()
+                self._exit_flush = None
         if self._pruner is not None:
             self._pruner.stop()
 
-    def shutdown(self) -> None:
+    def shutdown(self, timeout_s: float = 2.0) -> None:
         """Flush and stop providers, closing storage even if an exporter fails."""
+        with self._exit_lock:
+            if self._shutdown_started:
+                return
+            self._shutdown_started = True
+        deadline = time.monotonic() + max(0.0, min(timeout_s, 30.0))
         self.stop_pruning()
+        for flush in (self.reader.force_flush, self.traces.force_flush):
+            remaining_ms = int(max(0.0, deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                break
+            try:
+                if not flush(timeout_millis=remaining_ms):
+                    warn("flush_failed")
+            except Exception:
+                warn("flush_failed")
         try:
             self.traces.shutdown()
         finally:
             try:
-                self.metrics.shutdown(timeout_millis=2000)
+                self.metrics.shutdown(
+                    timeout_millis=max(0.0, deadline - time.monotonic()) * 1000
+                )
             finally:
                 if self._pruner is not None:
                     self._pruner.join()

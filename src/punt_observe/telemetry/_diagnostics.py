@@ -8,14 +8,14 @@ import time
 from contextlib import suppress
 
 logger = logging.getLogger("punt_observe.telemetry")
-_lock = threading.Lock()
+_lock = threading.RLock()
 _last = float("-inf")
 
 
 def reset_after_fork() -> None:
     """Replace inherited diagnostic synchronization and reset rate limiting."""
     global _lock, _last
-    _lock = threading.Lock()
+    _lock = threading.RLock()
     _last = float("-inf")
 
 
