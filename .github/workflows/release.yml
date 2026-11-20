@@ -1,0 +1,163 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: uv build
+      - run: uvx twine check dist/*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
+
+  check-tag:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Match tag to project version
+        shell: python
+        run: |
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{version}":
+              raise SystemExit(f"Tag/version mismatch: {tag!r}; expected v{version}")
+          print(f"Tag matches pyproject version: {tag}")
+
+  smoke:
+    needs: check-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - name: Smoke the release wheel without rebuilding
+        run: |
+          WHEEL="$(python -c 'from pathlib import Path; from smoke.gates import built_wheel; print(built_wheel(Path("dist")).resolve())')"
+          make smoke SMOKE_WHEEL="$WHEEL" \
+            SMOKE_VENV="$RUNNER_TEMP/smoke-venv" \
+            SMOKE_OUTPUT="$RUNNER_TEMP/smoke-results"
+
+  testpypi:
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  install-verify:
+    needs: testpypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - name: Install dependencies from PyPI
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          venv = str(Path(os.environ["RUNNER_TEMP"]) / "testpypi-venv")
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          dependencies = project["dependencies"] + project["optional-dependencies"]["otlp"]
+          subprocess.run(["uv", "venv", venv], check=True)
+          subprocess.run(
+              ["uv", "pip", "install", "--python", venv,
+               "--index-url", "https://pypi.org/simple/", *dependencies],
+              check=True,
+          )
+      - name: Download and hash-verify TestPyPI wheel
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          WHEEL="$(python -c 'from pathlib import Path; from smoke.gates import built_wheel; print(built_wheel(Path("dist")).resolve())')"
+          for attempt in $(seq 1 10); do
+            echo "Attempt $attempt/10: verifying punt-observe==$VERSION from TestPyPI..."
+            if python smoke/verify_release.py "$WHEEL" "$VERSION" \
+              "$RUNNER_TEMP/testpypi-download"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 10 ]; then sleep 60; fi
+          done
+          echo "::error::Failed to verify punt-observe==$VERSION from TestPyPI after 10 attempts"
+          exit 1
+      - name: Install only the verified TestPyPI wheel
+        run: |
+          WHEEL="$(python -c 'import os; from pathlib import Path; from smoke.gates import built_wheel; print(built_wheel(Path(os.environ["RUNNER_TEMP"]) / "testpypi-download").resolve())')"
+          uv pip install --python "$RUNNER_TEMP/testpypi-venv" \
+            --no-deps --reinstall --no-cache "$WHEEL"
+      - name: Verify installed version and telemetry
+        run: |
+          "$RUNNER_TEMP/testpypi-venv/bin/python" -c \
+            'import importlib.metadata, os; assert importlib.metadata.version("punt-observe") == os.environ["GITHUB_REF_NAME"][1:]'
+          "$RUNNER_TEMP/testpypi-venv/bin/python" smoke/run_package.py \
+            "$RUNNER_TEMP/testpypi-results"
+
+  pypi:
+    needs: install-verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

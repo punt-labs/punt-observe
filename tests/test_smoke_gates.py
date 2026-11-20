@@ -604,7 +604,10 @@ def test_build_requires_exactly_one_new_wheel(tmp_path: Path, count: int) -> Non
         gates.built_wheel(tmp_path)
 
 
-def test_installer_ignores_stale_dist_wheels(tmp_path: Path) -> None:
+@pytest.mark.parametrize("argument", [None, ""])
+def test_installer_ignores_stale_dist_wheels(
+    tmp_path: Path, argument: str | None
+) -> None:
     (tmp_path / "dist").mkdir()
     (tmp_path / "dist/punt_observe-old.whl").touch()
     (tmp_path / "uv").write_text(
@@ -620,7 +623,8 @@ if sys.argv[1] == "build":
     )
     (tmp_path / "uv").chmod(0o700)
     result = subprocess.run(
-        [sys.executable, str(SCRIPTS / "install_wheel.py"), "isolated-venv"],
+        [sys.executable, str(SCRIPTS / "install_wheel.py"), "isolated-venv"]
+        + ([] if argument is None else [argument]),
         cwd=tmp_path,
         env=os.environ
         | {
@@ -638,6 +642,49 @@ if sys.argv[1] == "build":
     ]
     assert install[-1] == str(Path(build[-1]) / "punt_observe-new.whl")
     assert "dist/punt_observe-old.whl" not in " ".join(install)
+
+
+@pytest.mark.parametrize("kind", ["wheel", "missing", "directory", "sdist"])
+def test_installer_uses_only_explicit_release_wheel(tmp_path: Path, kind: str) -> None:
+    wheel = tmp_path / ("artifact.tar.gz" if kind == "sdist" else "artifact.whl")
+    if kind == "directory":
+        wheel.mkdir()
+    elif kind != "missing":
+        wheel.touch()
+    commands = tmp_path / "commands.jsonl"
+    (tmp_path / "uv").write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        'with Path(os.environ["COMMANDS"]).open("a") as out:\n'
+        '    out.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+    )
+    (tmp_path / "uv").chmod(0o700)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "install_wheel.py"),
+            "isolated-venv",
+            str(wheel),
+        ],
+        env=os.environ
+        | {
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "COMMANDS": str(commands),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if kind == "wheel":
+        assert result.returncode == 0, result.stderr
+        assert [json.loads(line) for line in commands.read_text().splitlines()] == [
+            ["pip", "install", "--reinstall", "--python", "isolated-venv", str(wheel)]
+        ]
+    else:
+        assert result.returncode != 0
+        assert "install: expected an existing wheel file" in result.stderr
+        assert not commands.exists()
 
 
 def test_provenance_creates_fresh_parent(tmp_path: Path) -> None:

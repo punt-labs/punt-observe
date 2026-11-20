@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Add a tag-triggered, smoke-gated TestPyPI and PyPI trusted publishing workflow.
 - Defer shutdown's registry and pruning locks to its bounded worker and make
   diagnostic rate limiting reentrant, avoiding signal-handler shutdown deadlocks.
 - Publish exit work before starting its worker and reject activation after exit
