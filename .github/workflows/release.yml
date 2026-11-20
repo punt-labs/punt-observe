@@ -152,7 +152,7 @@ jobs:
     needs: install-verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: release
+    environment: pypi
     permissions:
       id-token: write
     steps:
