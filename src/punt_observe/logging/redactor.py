@@ -1,6 +1,6 @@
 """Port the quarry log_redactor.py reference (MIT, Punt Labs).
 
-Mask the URL secrets and control characters in a finished log line.
+Mask URL secrets, bearer credentials and control characters in a finished log line.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from punt_observe.logging.log_form import LogForm
 
 @final
 class LogRedactor:
-    r"""Strip what a URL or a control character can smuggle into a log line.
+    r"""Strip credentials and control characters from a log line.
 
     The last line of defence, applied to the finished text (message, arguments and
     traceback alike) at the one place every record is written.  The types that
@@ -23,6 +23,7 @@ class LogRedactor:
     regardless: ``scheme://user:pw@host/path?query#fragment`` becomes
     ``scheme://host/…(segments=1)``, a bare ``user:pw@`` or ``?query`` is masked, and a
     control character is escaped so it cannot forge or hide a log line.
+    ``Bearer <token>`` keeps the scheme but replaces the token with ``[bearer]``.
 
     The contract, in the order it is applied:
 
@@ -33,11 +34,12 @@ class LogRedactor:
        :class:`~quarry.authority_mask.AuthorityMask` specifies: to the last ``@``,
        never across a line break except for the one continuation it names, and
        with everything outside the masked span kept exactly.
-    4. Each whitespace-free token is then worked alone.  A token longer than
+    4. Bearer credentials are masked wherever they occur on a line.
+    5. Each whitespace-free token is then worked alone.  A token longer than
        :attr:`MAX_TOKEN` is replaced; a URL becomes its log form; a bare
        ``user:password@`` and a ``?query`` are masked.
 
-    Steps 2 to 4 repeat until a pass changes nothing (the mask one pass leaves can
+    Steps 2 to 5 repeat until a pass changes nothing (the mask one pass leaves can
     read differently to the next), so redacting a record twice gives the record
     redacted once.  After :attr:`PASSES` passes without a fixed point the record is
     withheld: :meth:`settle` says so with ``None``, for a caller that has the
@@ -45,9 +47,8 @@ class LogRedactor:
     is capped at :attr:`MAX_RECORD` bytes. Redaction never logs.
 
     A line with no control character, no ``scheme://``, no
-    ``user:password@``, no ``?query`` and no token over :attr:`MAX_TOKEN` comes back
-    as it went in; both claims are checked against generated text in
-    ``tests/test_log_redactor_oracle.py``.
+    ``user:password@``, no ``?query``, no bearer credential and no token over
+    :attr:`MAX_TOKEN` comes back unchanged; see ``tests/test_log_redactor_oracle.py``.
 
     It runs under the handler lock and holds the GIL, so its cost must be linear
     in the record: every pattern is bounded, a token is worked once, and a
@@ -81,6 +82,11 @@ class LogRedactor:
     )
     _QUERY: ClassVar[re.Pattern[str]] = re.compile(r"\?\S{1,2048}")
     _FRAGMENT: ClassVar[re.Pattern[str]] = re.compile(r"#\S{1,2048}")
+    # Look ahead so adjacent schemes are detected even if one looks like a token.
+    _BEARER: ClassVar[re.Pattern[str]] = re.compile(
+        r"(?:(?<![\w-])|(?<=\\[nr]))(?i:bearer)[ \t]+"
+        r"(?=([A-Za-z0-9._~+/-]++=*+)(?=$|[\s\"',;)\]}>\\]))"
+    )
     _CONTROL: ClassVar[re.Pattern[str]] = re.compile(
         r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029]"
     )
@@ -91,7 +97,7 @@ class LogRedactor:
 
     @classmethod
     def settle(cls, text: str) -> str | None:
-        """Return *text* with URL userinfo, query and fragment masked, or ``None``.
+        """Return *text* with secrets masked, or ``None`` on failure.
 
         ``None`` means the passes did not settle, so nothing of *text* may be shown.
 
@@ -136,13 +142,26 @@ class LogRedactor:
 
     @classmethod
     def _once(cls, text: str) -> str:
-        """Return *text* through one pass: escapes, authorities, then each token."""
+        """Escape controls and mask credentials, then redact each token."""
         # Escaped first, so the text every later step sees is the text that is
         # written.
         text = cls._CONTROL.sub(cls._escape, text)
         if ":" in text and "@" in text:
             text = AuthorityMask.mask(text)
+        if "bearer" in text.lower():
+            text = cls._mask_bearers(text)
         return cls._TOKEN.sub(cls._token, text)
+
+    @classmethod
+    def _mask_bearers(cls, text: str) -> str:
+        """Replace RFC 6750 tokens while preserving surrounding text."""
+        parts: list[str] = []
+        end = 0
+        for match in cls._BEARER.finditer(text):
+            start, stop = match.span(1)
+            parts.extend((text[end:start], "[bearer]"))
+            end = stop
+        return "".join((*parts, text[end:])) if parts else text
 
     @classmethod
     def one_line(cls, message: str) -> str:

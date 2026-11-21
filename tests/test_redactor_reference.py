@@ -50,6 +50,31 @@ class TestRedact:
         assert redacted(raw) == shown
 
 
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [
+        ("Bearer a", "Bearer [bearer]"),
+        (
+            "'Authorization': 'bEaReR  a_B.c~d+e/f-g=='",
+            "'Authorization': 'bEaReR  [bearer]'",
+        ),
+        ("Bearer abc, Bearer def;", "Bearer [bearer], Bearer [bearer];"),
+        ("received bearer Bearer fixture", "received bearer [bearer] [bearer]"),
+        (
+            "non-bearer scheme, Bearer\nnext line",
+            "non-bearer scheme, Bearer\nnext line",
+        ),
+        (
+            "Bearer https://u:SECRET@h.test/p?q=SECRET",
+            "Bearer https://h.test/…(segments=1)",
+        ),
+    ],
+)
+def test_bearer_redaction_settles(raw: str, shown: str) -> None:
+    assert redacted(raw) == shown
+    assert redacted(shown) == shown
+
+
 def _seconds(text: str) -> float:
     started = time.process_time()
     redacted(text)
