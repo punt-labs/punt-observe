@@ -71,6 +71,18 @@ def test_basic_replacement_and_idempotence() -> None:
     assert LogRedactor.settle("/account/alice/file") == "~/file"
 
 
+@pytest.mark.parametrize("escape", ["\x1b", r"\x1b", r"\u001b", r"\U0000001b"])
+@pytest.mark.parametrize("csi", ["31m", "1;31m", "2K"])
+def test_ansi_coloured_home(escape: str, csi: str) -> None:
+    raw = f"{escape}[{csi}/home/alice/file{escape}[0m"
+    shown = LogRedactor.settle(raw)
+    assert shown is not None
+    assert "~/file" in shown
+    assert "/home/alice" not in shown
+    assert shown.endswith("[0m")
+    assert LogRedactor.settle(shown) == shown
+
+
 @pytest.mark.parametrize(
     "raw", ["/home/alice2/file", "/home/alice.old/file", "/other/home/alice/file"]
 )

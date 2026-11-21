@@ -39,8 +39,9 @@ def _pattern(candidates: tuple[str, ...]) -> re.Pattern[str]:
     """Compile longest-first alternatives with path-component boundaries."""
     alternatives = "|".join(re.escape(candidate) for candidate in candidates)
     return re.compile(
-        r"(?:(?<![\w/~.\-])|(?<=\\[nrt])|(?<=\\x[0-9a-fA-F]{2})"
-        r"|(?<=\\u[0-9a-fA-F]{4})|(?<=\\U[0-9a-fA-F]{8}))(?:"
+        r"(?P<prefix>(?:(?<![\w/~.\-])|(?<=\\[nrt])|(?<=\\x[0-9a-fA-F]{2})"
+        r"|(?<=\\u[0-9a-fA-F]{4})|(?<=\\U[0-9a-fA-F]{8})"
+        r"|(?:\x1b|\\x1[bB]|\\u001[bB]|\\U0000001[bB])\[[0-?]*[ -/]*[@-~]))(?:"
         + alternatives
         + r")(?=$|[/\s\x00-\x1f\x7f-\x9f'\"`:;,()\[\]{}<>!?]"
         r"|\\(?:[abfnrtv]|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8})"
@@ -65,4 +66,8 @@ class HomePaths:
                 key=lambda candidate: (-len(candidate), candidate),
             )
         )
-        return _pattern(candidates).sub("~", text) if candidates else text
+        return (
+            _pattern(candidates).sub(lambda match: match["prefix"] + "~", text)
+            if candidates
+            else text
+        )
