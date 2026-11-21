@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Mask bare bearer credentials in formatted diagnostics before writing logs.
 - Add a tag-triggered, smoke-gated TestPyPI and PyPI trusted publishing workflow.
 - Defer shutdown's registry and pruning locks to its bounded worker and make
   diagnostic rate limiting reentrant, avoiding signal-handler shutdown deadlocks.

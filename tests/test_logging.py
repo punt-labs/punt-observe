@@ -258,6 +258,34 @@ def test_final_redaction_and_cap(tmp_path: Path) -> None:
     assert len((LogRedactor.settle("é " * 70000) or "").encode()) <= 65536
 
 
+def test_bearer_credentials_are_masked_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = configure_logging("test", "cli")
+    logger = logging.getLogger("test")
+
+    token = "fixture.header_signature-~+/=="
+    logger.info("request Authorization: Bearer %s status=401", token)
+    logger.info("headers:\nBearer %s\nend", token)
+    logger.info("response:\x0bBearer %s: rejected", token)
+    logger.info("headers %r", f"X:\tBearer\t{token}!")
+    error = "received 'bEaReR\tfixture-exception'"
+    try:
+        raise ValueError(error)
+    except ValueError:
+        logger.exception("request failed")
+
+    written = path.read_text(encoding="utf-8")
+    assert "request Authorization: Bearer [bearer] status=401" in written
+    assert r"headers:\nBearer [bearer]\nend" in written
+    assert r"response:\x0bBearer [bearer]: rejected" in written
+    assert r"headers 'X:\tBearer\t[bearer]!'" in written
+    assert r"ValueError: received 'bEaReR\x09[bearer]'" in written
+    assert token not in written
+    assert "fixture-exception" not in written
+
+
 def test_broken_stderr_cannot_echo_raw_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

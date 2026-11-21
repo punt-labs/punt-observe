@@ -50,6 +50,40 @@ class TestRedact:
         assert redacted(raw) == shown
 
 
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [
+        ("Bearer a", "Bearer [bearer]"),
+        (
+            "'Authorization': 'bEaReR  a_B.c~d+e/f-g=='",
+            "'Authorization': 'bEaReR  [bearer]'",
+        ),
+        ("Bearer abc, Bearer def;", "Bearer [bearer], Bearer [bearer];"),
+        ("Bearer <abc> Bearer `def`", "Bearer <[bearer]> Bearer `[bearer]`"),
+        ("Bearer abc%2Bdef=tail", "Bearer [bearer]"),
+        ("Bearer %2Fencoded", "Bearer [bearer]"),
+        (r"Authorization: Bearer\x09abc", r"Authorization: Bearer\x09[bearer]"),
+        ("Authorization: Bearer\x0babc", r"Authorization: Bearer\x0b[bearer]"),
+        ("received bearer Bearer fixture", "received bearer [bearer] [bearer]"),
+        ("Bearer abc! Bearer def?", "Bearer [bearer]! Bearer [bearer]?"),
+        ("Bearer abc?key=value", "Bearer [bearer]?[query]"),
+        ("a\u2028Bearer abc", r"a\u2028Bearer [bearer]"),
+        ("\x1b[33mBearer abc\x1b[0m", r"\x1b[33mBearer [bearer]\x1b[0m"),
+        (
+            "non-bearer scheme, Bearer\nnext line",
+            "non-bearer scheme, Bearer\nnext line",
+        ),
+        (
+            "Bearer https://u:SECRET@h.test/p?q=SECRET",
+            "Bearer https://h.test/…(segments=1)",
+        ),
+    ],
+)
+def test_bearer_redaction_settles(raw: str, shown: str) -> None:
+    assert redacted(raw) == shown
+    assert redacted(shown) == shown
+
+
 def _seconds(text: str) -> float:
     started = time.process_time()
     redacted(text)
@@ -80,6 +114,7 @@ class TestLinearTime:
             ("a" * 700 + ":") * 2 + "b" * 600 + "@ ",
             "://" + "a" * 2045 + " ",
             "a" * 2044 + "://" + "a" * 2 + " ",
+            "Bearer " + "a" * 500 + "! ",
         ],
         ids=[
             "colons",
@@ -92,6 +127,7 @@ class TestLinearTime:
             "colon-separated-runs",
             "slashes-then-long-run",
             "long-scheme-run",
+            "bearer-runs",
         ],
     )
     def test_the_cost_scales_linearly(self, unit: str) -> None:
