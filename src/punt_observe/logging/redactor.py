@@ -88,7 +88,7 @@ class LogRedactor:
         r"(?:(?<![\w-])|(?<=\\[nrt])|(?<=\\x[0-9a-fA-F]{2})"
         r"|(?<=\\u[0-9a-fA-F]{4})|(?<=\\U[0-9a-fA-F]{8})"
         r"|(?:\\x1b\[|\\x9b)[0-9;:]*m)"
-        r"(?i:bearer)(?:[ \t]|\\t)++[\"'<`]?"
+        r"(?i:bearer)(?:[ \t]|\\(?:t|x(?:09|0[bB]|20)))++[\"'<`]?"
         r"(?=([A-Za-z0-9._~+/%-][A-Za-z0-9._~+/=%-]*+)(?!://))"
     )
     _CONTROL: ClassVar[re.Pattern[str]] = re.compile(
@@ -158,7 +158,7 @@ class LogRedactor:
 
     @classmethod
     def _mask_bearers(cls, text: str) -> str:
-        """Mask bearer tokens, including percent-encoded or irregular padding."""
+        """Mask bearer tokens without joining separate log lines."""
         parts: list[str] = []
         end = 0
         for match in cls._BEARER.finditer(text):
