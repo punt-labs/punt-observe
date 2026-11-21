@@ -13,11 +13,41 @@ import pytest
 from punt_observe.logging import configure_logging, home_paths
 from punt_observe.logging.append_log import AtomicAppendLog
 from punt_observe.logging.formatter import RedactingFormatter
+from punt_observe.logging.handler import PrivateFileHandler
 from punt_observe.logging.redactor import LogRedactor
 
 # pyright: reportPrivateUsage=false
 
 _PASSWD_HOME = home_paths._passwd_home
+
+
+@pytest.mark.parametrize("custom_formatter", [False, True])
+@pytest.mark.parametrize("separator", ["\t", "\n", "\x01"])
+def test_handler_keeps_fields_after_url(
+    tmp_path: Path, custom_formatter: bool, separator: str
+) -> None:
+    path = tmp_path / "logs" / "test.log"
+    handler = PrivateFileHandler(path)
+    formatter = logging.Formatter if custom_formatter else RedactingFormatter
+    handler.setFormatter(formatter("%(message)s"))
+    record = logging.LogRecord(
+        "test",
+        logging.INFO,
+        __file__,
+        1,
+        "request https://example.org%sstatus=500 /home/alice/file",
+        (separator,),
+        None,
+    )
+    try:
+        handler.handle(record)
+    finally:
+        handler.close()
+    shown = path.read_text()
+    assert "status=500 ~/file" in shown
+    assert "https://example.org" in shown
+    assert shown.count("\n") == 1
+    assert "/home/alice" not in shown
 
 
 @pytest.fixture(autouse=True)

@@ -136,18 +136,27 @@ class AtomicAppendLog:
         backstops.
         """
         try:
-            try:
-                redacted = LogRedactor.settle(text)
-            except Exception:
-                redacted = None
-            if redacted is None:
-                # Preserve only the formatter's fixed, path-free failure envelope.
-                redacted = (
-                    text
-                    if _WITHHELD.fullmatch(text)
-                    else "[record withheld: redaction did not settle]"
-                )
-            line = f"{SANITIZER.escape(redacted)}\n".encode(errors="backslashreplace")
+            redacted = LogRedactor.settle(text)
+        except Exception:
+            redacted = None
+        if redacted is None:
+            # Preserve only the formatter's fixed, path-free failure envelope.
+            redacted = (
+                text
+                if _WITHHELD.fullmatch(text)
+                else "[record withheld: redaction did not settle]"
+            )
+        self.append_redacted(redacted)
+
+    def append_redacted(self, text: str) -> None:
+        """Append trusted, already-redacted text without settling it again.
+
+        Use :meth:`append` for raw content. This entry point is for handlers
+        that have already applied final-text redaction and byte bounds.
+        Control escaping and the atomic write protocol still apply.
+        """
+        try:
+            line = f"{SANITIZER.escape(text)}\n".encode(errors="backslashreplace")
             self._guard.ensure_private_tree()
             self._append_guarded(line)
         except OSError as exc:
