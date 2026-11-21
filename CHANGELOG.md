@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Replace environment, account and resolved home-directory prefixes with `~` in
+  final diagnostics and raw atomic appends, including bootstrap crash logs.
 - Mask bare bearer credentials in formatted diagnostics before writing logs.
 - Add a tag-triggered, smoke-gated TestPyPI and PyPI trusted publishing workflow.
 - Defer shutdown's registry and pruning locks to its bounded worker and make

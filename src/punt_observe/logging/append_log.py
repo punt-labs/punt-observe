@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
+import re
 import stat
 import sys
 from collections.abc import Iterator
@@ -38,6 +39,7 @@ from pathlib import Path
 from typing import Self, TypedDict, final
 
 from punt_observe._private_fs import PrivatePaths as PrivateState
+from punt_observe.logging.redactor import LogRedactor
 from punt_observe.logging.sanitize import SANITIZER
 
 __all__ = ["AtomicAppendLog", "SinkHealth"]
@@ -64,6 +66,10 @@ _LOCK_SUFFIX = ".rotate.lock"
 _LOCK_MODE = 0o600  # private per-user lock file
 _MAX_BYTES = 5_242_880  # 5 MB
 _BACKUP_COUNT = 5
+_WITHHELD = re.compile(
+    r"\[(?:DEBUG|INFO|WARNING|ERROR|CRITICAL|UNKNOWN)\] "
+    r"[A-Za-z_][A-Za-z0-9_.]{0,255}: \[record withheld: redaction did not settle\]"
+)
 
 
 @final
@@ -114,9 +120,9 @@ class AtomicAppendLog:
         return {"name": name, "status": "healthy" if self.is_writable() else "degraded"}
 
     def append(self, text: str) -> None:
-        """Escape *text* to one line and append it atomically; never raise, never log.
+        """Redact and escape *text*, then append atomically without logging.
 
-        *text* is escaped by the shared :data:`SANITIZER` so the record is exactly
+        *text* is redacted before the shared :data:`SANITIZER` so it is exactly
         one physical line no control byte can forge or corrupt -- callers pass raw
         content and trust the sink to keep it one line. The ``encode`` uses
         ``backslashreplace`` and runs *inside* the guard, so a lone surrogate in
@@ -128,6 +134,26 @@ class AtomicAppendLog:
         ``OSError`` the sink writes to ``sys.__stderr__`` -- never through
         ``logging``, which would recurse into the client log handler this sink
         backstops.
+        """
+        try:
+            redacted = LogRedactor.settle(text)
+        except Exception:
+            redacted = None
+        if redacted is None:
+            # Preserve only the formatter's fixed, path-free failure envelope.
+            redacted = (
+                text
+                if _WITHHELD.fullmatch(text)
+                else "[record withheld: redaction did not settle]"
+            )
+        self.append_redacted(redacted)
+
+    def append_redacted(self, text: str) -> None:
+        """Append trusted, already-redacted text without settling it again.
+
+        Use :meth:`append` for raw content. This entry point is for handlers
+        that have already applied final-text redaction and byte bounds.
+        Control escaping and the atomic write protocol still apply.
         """
         try:
             line = f"{SANITIZER.escape(text)}\n".encode(errors="backslashreplace")
@@ -355,4 +381,8 @@ class AtomicAppendLog:
         if err is None:
             return
         with contextlib.suppress(OSError, ValueError):
-            err.write(f"[append-log] {message}\n")
+            try:
+                redacted = LogRedactor.settle(message)
+            except Exception:
+                redacted = None
+            err.write(f"[append-log] {redacted or '[diagnostic withheld]'}\n")

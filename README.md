@@ -31,6 +31,13 @@ Rotation is safe across cooperating processes using a stable flock lock.
 Setup permission failures raise `LoggingSetupError`; append failures are best-effort.
 Final formatted records are redacted, control-escaped and bounded to 64 KiB including
 their newline. Redaction is defense in depth: **never log content or secrets**.
+Home-directory prefixes become `~` on path-component boundaries, including in
+tracebacks and direct `AtomicAppendLog.append()` calls. Candidates include the
+current `HOME` (read at redaction time), the current uid's passwd home and their
+resolved aliases. Alias resolution is cached by input; empty, relative and root
+homes are ignored. This does not mask standalone account names or other users'
+homes, and cached aliases do not track symlink retargeting.
+Direct appends also apply the redactor's 64 KiB text cap before single-line escaping.
 
 ## Telemetry
 

@@ -65,6 +65,6 @@ class PrivateFileHandler(logging.Handler):
         try:
             from_text = self.format(record)
             # Escape first: the expansion must count against the byte budget.
-            self.sink.append(bounded(escape(from_text)))
+            self.sink.append_redacted(bounded(escape(from_text)))
         except Exception:
             _report_failure()
