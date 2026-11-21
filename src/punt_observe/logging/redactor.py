@@ -10,6 +10,7 @@ from collections import Counter
 from typing import ClassVar, final
 
 from punt_observe.logging.authority_mask import AuthorityMask
+from punt_observe.logging.home_paths import HomePaths
 from punt_observe.logging.log_form import LogForm
 
 
@@ -28,7 +29,8 @@ class LogRedactor:
     The contract, in the order it is applied:
 
     1. Input is prebounded at :attr:`MAX_RECORD` characters, with a visible marker.
-    2. Control characters are escaped (``\x1b``), so every later step reads the
+    2. Home prefixes become ``~``; control characters are escaped (``\x1b``),
+       so every later step reads the
        text that is written.  Newlines are kept; :meth:`one_line` escapes them.
     3. The userinfo of every ``scheme://`` authority is masked as
        :class:`~quarry.authority_mask.AuthorityMask` specifies: to the last ``@``,
@@ -48,7 +50,7 @@ class LogRedactor:
 
     A line with no control character, no ``scheme://``, no
     ``user:password@``, no ``?query``, no text shaped like a bearer credential and no
-    token over :attr:`MAX_TOKEN` comes back unchanged.
+    token over :attr:`MAX_TOKEN` and no home prefix comes back unchanged.
 
     It runs under the handler lock and holds the GIL, so its cost must be linear
     in the record: every pattern is bounded, a token is worked once, and a
@@ -149,6 +151,7 @@ class LogRedactor:
         """Escape controls and mask credentials, then redact each token."""
         # Escaped first, so the text every later step sees is the text that is
         # written.
+        text = HomePaths.mask(text)
         text = cls._CONTROL.sub(cls._escape, text)
         if ":" in text and "@" in text:
             text = AuthorityMask.mask(text)
