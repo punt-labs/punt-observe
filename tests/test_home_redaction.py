@@ -49,6 +49,20 @@ def test_home_prefix_boundaries(suffix: str) -> None:
     assert LogRedactor.settle(f"Wrote /home/alice{suffix}") == f"Wrote ~{suffix}"
 
 
+@pytest.mark.parametrize(
+    "separator",
+    ["\n", "\t", "\x1b", r"\n", r"\t", r"\x09", r"\u000a", r"\U0000000a"],
+)
+def test_home_before_escaped_message_separator(separator: str) -> None:
+    record = logging.LogRecord(
+        "test", logging.INFO, __file__, 1, "/home/alice%snext", (separator,), None
+    )
+    shown = RedactingFormatter("%(message)s").format(record)
+    assert shown.startswith("~")
+    assert shown.endswith("next")
+    assert "/home/alice" not in shown
+
+
 def test_basic_replacement_and_idempotence() -> None:
     raw = "Wrote port file: /home/alice/.punt-labs/vox/run/serve.port (port 1234)"
     shown = "Wrote port file: ~/.punt-labs/vox/run/serve.port (port 1234)"
