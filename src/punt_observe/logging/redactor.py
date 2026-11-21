@@ -47,8 +47,8 @@ class LogRedactor:
     is capped at :attr:`MAX_RECORD` bytes. Redaction never logs.
 
     A line with no control character, no ``scheme://``, no
-    ``user:password@``, no ``?query``, no bearer credential and no token over
-    :attr:`MAX_TOKEN` comes back unchanged; see ``tests/test_log_redactor_oracle.py``.
+    ``user:password@``, no ``?query``, no text shaped like a bearer credential and no
+    token over :attr:`MAX_TOKEN` comes back unchanged.
 
     It runs under the handler lock and holds the GIL, so its cost must be linear
     in the record: every pattern is bounded, a token is worked once, and a
@@ -82,10 +82,14 @@ class LogRedactor:
     )
     _QUERY: ClassVar[re.Pattern[str]] = re.compile(r"\?\S{1,2048}")
     _FRAGMENT: ClassVar[re.Pattern[str]] = re.compile(r"#\S{1,2048}")
-    # Look ahead so adjacent schemes are detected even if one looks like a token.
+    # Detect overlapping "bearer Bearer TOKEN" without joining matches.
+    # Leave scheme URLs intact for the URL redactor.
     _BEARER: ClassVar[re.Pattern[str]] = re.compile(
-        r"(?:(?<![\w-])|(?<=\\[nr]))(?i:bearer)[ \t]+"
-        r"(?=([A-Za-z0-9._~+/-]++=*+)(?=$|[\s\"',;)\]}>\\]))"
+        r"(?:(?<![\w-])|(?<=\\[nrt])|(?<=\\x[0-9a-fA-F]{2})"
+        r"|(?<=\\u[0-9a-fA-F]{4})|(?<=\\U[0-9a-fA-F]{8})"
+        r"|(?:\\x1b\[|\\x9b)[0-9;:]*m)"
+        r"(?i:bearer)(?:[ \t]|\\t)++[\"'<`]?"
+        r"(?=([A-Za-z0-9._~+/%-][A-Za-z0-9._~+/=%-]*+)(?!://))"
     )
     _CONTROL: ClassVar[re.Pattern[str]] = re.compile(
         r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029]"
@@ -154,7 +158,7 @@ class LogRedactor:
 
     @classmethod
     def _mask_bearers(cls, text: str) -> str:
-        """Replace RFC 6750 tokens while preserving surrounding text."""
+        """Mask bearer tokens, including percent-encoded or irregular padding."""
         parts: list[str] = []
         end = 0
         for match in cls._BEARER.finditer(text):

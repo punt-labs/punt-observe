@@ -59,7 +59,13 @@ class TestRedact:
             "'Authorization': 'bEaReR  [bearer]'",
         ),
         ("Bearer abc, Bearer def;", "Bearer [bearer], Bearer [bearer];"),
+        ("Bearer <abc> Bearer `def`", "Bearer <[bearer]> Bearer `[bearer]`"),
+        ("Bearer abc%2Bdef=tail", "Bearer [bearer]"),
         ("received bearer Bearer fixture", "received bearer [bearer] [bearer]"),
+        ("Bearer abc! Bearer def?", "Bearer [bearer]! Bearer [bearer]?"),
+        ("Bearer abc?key=value", "Bearer [bearer]?[query]"),
+        ("a\u2028Bearer abc", r"a\u2028Bearer [bearer]"),
+        ("\x1b[33mBearer abc\x1b[0m", r"\x1b[33mBearer [bearer]\x1b[0m"),
         (
             "non-bearer scheme, Bearer\nnext line",
             "non-bearer scheme, Bearer\nnext line",
@@ -105,6 +111,7 @@ class TestLinearTime:
             ("a" * 700 + ":") * 2 + "b" * 600 + "@ ",
             "://" + "a" * 2045 + " ",
             "a" * 2044 + "://" + "a" * 2 + " ",
+            "Bearer " + "a" * 500 + "! ",
         ],
         ids=[
             "colons",
@@ -117,6 +124,7 @@ class TestLinearTime:
             "colon-separated-runs",
             "slashes-then-long-run",
             "long-scheme-run",
+            "bearer-runs",
         ],
     )
     def test_the_cost_scales_linearly(self, unit: str) -> None:
