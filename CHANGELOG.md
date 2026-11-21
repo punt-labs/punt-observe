@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Add end-to-end regression coverage for home prefixes before raw and escaped
+  message controls in formatted diagnostics and atomic appends, preserving longer
+  sibling path components.
 - Replace environment, account and resolved home-directory prefixes with `~` in
   final diagnostics and raw atomic appends, including bootstrap crash logs.
 - Mask bare bearer credentials in formatted diagnostics before writing logs.

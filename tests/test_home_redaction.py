@@ -90,6 +90,58 @@ def test_home_before_escaped_message_separator(separator: str) -> None:
     assert "/home/alice" not in shown
 
 
+@pytest.mark.parametrize(
+    ("path", "expected_path"),
+    [
+        ("/home/alice", "~"),
+        ("/account/alice", "~"),
+        ("/home/alice2", "/home/alice2"),
+        ("/home/alicex", "/home/alicex"),
+        ("/account/alice2", "/account/alice2"),
+        ("/account/alicex", "/account/alicex"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("separator", "formatted_separator", "disk_separator", "raw_separator"),
+    [
+        ("\n", r"\n", r"\n", r"\x0a"),
+        ("\r", r"\r", r"\r", r"\x0d"),
+        ("\t", "\t", r"\x09", r"\x09"),
+        ("\x01", r"\x01", r"\x01", r"\x01"),
+        (r"\n", r"\n", r"\n", r"\n"),
+        (r"\x0a", r"\x0a", r"\x0a", r"\x0a"),
+    ],
+)
+def test_bare_home_before_controls_through_durable_sinks(
+    tmp_path: Path,
+    path: str,
+    expected_path: str,
+    separator: str,
+    formatted_separator: str,
+    disk_separator: str,
+    raw_separator: str,
+) -> None:
+    record = logging.LogRecord(
+        "test", logging.INFO, __file__, 1, f"Wrote %s{separator}next", (path,), None
+    )
+    formatter = RedactingFormatter("%(levelname)s %(message)s")
+    assert formatter.format(record) == (
+        f"INFO Wrote {expected_path}{formatted_separator}next"
+    )
+    log = tmp_path / "logs" / "formatted.log"
+    handler = PrivateFileHandler(log)
+    handler.setFormatter(formatter)
+    try:
+        handler.handle(record)
+    finally:
+        handler.close()
+    assert log.read_text() == f"INFO Wrote {expected_path}{disk_separator}next\n"
+
+    raw_log = tmp_path / "logs" / "raw.log"
+    AtomicAppendLog(raw_log).append(f"Wrote {path}{separator}next")
+    assert raw_log.read_text() == f"Wrote {expected_path}{raw_separator}next\n"
+
+
 def test_basic_replacement_and_idempotence() -> None:
     raw = "Wrote port file: /home/alice/.punt-labs/vox/run/serve.port (port 1234)"
     shown = "Wrote port file: ~/.punt-labs/vox/run/serve.port (port 1234)"
