@@ -38,6 +38,12 @@ def test_query_redaction_preserves_prose_punctuation(raw: str, shown: str) -> No
     assert redacted(shown) == shown
 
 
+@pytest.mark.parametrize("size", [2048, 4096, 10000])
+def test_oversized_bearer_query_masks_its_entire_suffix(size: int) -> None:
+    raw = "Bearer abc?" + "a" * size + "SECRET end"
+    assert redacted(raw) == "Bearer [bearer]?[query] end"
+
+
 class TestRedact:
     @pytest.mark.parametrize(
         ("raw", "shown"),

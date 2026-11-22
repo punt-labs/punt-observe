@@ -86,9 +86,7 @@ class LogRedactor:
         r"^(?P<path>(?=[^?\s]{0,2048}/)[^?\s]{1,2048})"
         r"\?[A-Za-z0-9_%~.\-]\S{0,2047}"
     )
-    _BEARER_QUERY: ClassVar[re.Pattern[str]] = re.compile(
-        r"(?<=\[bearer\])\?\S{1,2048}"
-    )
+    _BEARER_QUERY: ClassVar[re.Pattern[str]] = re.compile(r"(?<=\[bearer\])\?\S+")
     _FRAGMENT: ClassVar[re.Pattern[str]] = re.compile(r"#\S{1,2048}")
     # Detect overlapping "bearer Bearer TOKEN" without joining matches.
     # Leave scheme URLs intact for the URL redactor.
