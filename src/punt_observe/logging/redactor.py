@@ -22,8 +22,8 @@ class LogRedactor:
     traceback alike) at the one place every record is written.  The types that
     carry a URL are the guarantee; this catches whatever a library quotes
     regardless: ``scheme://user:pw@host/path?query#fragment`` becomes
-    ``scheme://host/…(segments=1)``, a bare ``user:pw@`` or ``?query`` is masked, and a
-    control character is escaped so it cannot forge or hide a log line.
+    ``scheme://host/…(segments=1)``; bare ``user:pw@`` and path queries are masked.
+    A control character is escaped so it cannot forge or hide a log line.
     ``Bearer <token>`` keeps the scheme but replaces the token with ``[bearer]``.
 
     The contract, in the order it is applied:
@@ -39,7 +39,7 @@ class LogRedactor:
     4. Bearer credentials are masked wherever they occur on a line.
     5. Each whitespace-free token is then worked alone.  A token longer than
        :attr:`MAX_TOKEN` is replaced; a URL becomes its log form; a bare
-       ``user:password@`` and a ``?query`` are masked.
+       ``user:password@`` and URL/path queries are masked.
 
     Steps 2 to 5 repeat until a pass changes nothing (the mask one pass leaves can
     read differently to the next), so redacting a record twice gives the record
@@ -49,8 +49,8 @@ class LogRedactor:
     is capped at :attr:`MAX_RECORD` bytes. Redaction never logs.
 
     A line with no control character, no ``scheme://``, no
-    ``user:password@``, no ``?query``, no text shaped like a bearer credential and no
-    token over :attr:`MAX_TOKEN` and no home prefix comes back unchanged.
+    ``user:password@``, no URL/path query, no text shaped like a bearer credential,
+    no token over :attr:`MAX_TOKEN` and no home prefix comes back unchanged.
 
     It runs under the handler lock and holds the GIL, so its cost must be linear
     in the record: every pattern is bounded, a token is worked once, and a
@@ -82,7 +82,8 @@ class LogRedactor:
     _USERINFO: ClassVar[re.Pattern[str]] = re.compile(
         r"(?<![^\s/@:'\"<>])[^\s/@:'\"<>]{0,2048}:[^\s/@'\"<>]{0,2048}@"
     )
-    _QUERY: ClassVar[re.Pattern[str]] = re.compile(r"\?\S{1,2048}")
+    _QUERY: ClassVar[re.Pattern[str]] = re.compile(r"\?(?![!)]$)\S{1,2048}")
+    _BEARER_QUERY: ClassVar[re.Pattern[str]] = re.compile(r"(?<=\[bearer\])\?\S+")
     _FRAGMENT: ClassVar[re.Pattern[str]] = re.compile(r"#\S{1,2048}")
     # Detect overlapping "bearer Bearer TOKEN" without joining matches.
     # Leave scheme URLs intact for the URL redactor.
@@ -168,7 +169,9 @@ class LogRedactor:
             start, stop = match.span(1)
             parts.extend((text[end:start], "[bearer]"))
             end = stop
-        return "".join((*parts, text[end:])) if parts else text
+        if not parts:
+            return text
+        return cls._BEARER_QUERY.sub("?[query]", "".join((*parts, text[end:])))
 
     @classmethod
     def one_line(cls, message: str) -> str:
@@ -238,7 +241,9 @@ class LogRedactor:
     def _is_host_query(token: str) -> bool:
         """Return whether *token* is a bare host (and port) followed by a query."""
         head, _, query = token.partition("?")
-        return bool(query) and bool(AuthorityMask.HOST.fullmatch(head))
+        return bool(re.match(r"[A-Za-z0-9_%~.\-@=&]", query)) and bool(
+            AuthorityMask.HOST.fullmatch(head)
+        )
 
     @staticmethod
     def _escape(match: re.Match[str]) -> str:

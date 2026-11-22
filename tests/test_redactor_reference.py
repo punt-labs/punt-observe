@@ -14,6 +14,56 @@ from tests.redaction import redacted
 from tests.stream_handler import RedactingStreamHandler
 
 
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [
+        ("payload_ok=?)", "payload_ok=?)"),
+        ("really?", "really?"),
+        ("what?!", "what?!"),
+        ("https://x.test/p?token=abc", "https://x.test/…(segments=1)"),
+        ("/path?a=1", "/path?[query]"),
+        ("/path?_token=abc", "/path?[query]"),
+        ("/path?%74oken=abc", "/path?[query]"),
+        ("x.test?token=abc", "x.test?[query]"),
+        ("localhost?token=abc", "localhost?[query]"),
+        ("h:80?token=abc", "h:80?[query]"),
+        ("h?=abc", "h?[query]"),
+        ("h?@abc", "[userinfo]?[query]"),
+        ("Bearer abc?=SECRET", "Bearer [bearer]?[query]"),
+        ("", ""),
+    ],
+)
+def test_query_redaction_preserves_prose_punctuation(raw: str, shown: str) -> None:
+    assert redacted(raw) == shown
+    assert redacted(shown) == shown
+
+
+@pytest.mark.parametrize("size", [2048, 4096, 10000])
+def test_oversized_bearer_query_masks_its_entire_suffix(size: int) -> None:
+    raw = "Bearer abc?" + "a" * size + "SECRET end"
+    assert redacted(raw) == "Bearer [bearer]?[query] end"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "x.test?token=SECRET",
+        '"x.test?token=SECRET"',
+        "'x.test/p?token=SECRET'",
+        'Bearer "abc"?token=SECRET',
+        "Bearer 'abc'?token=SECRET",
+        "Bearer `abc`?token=SECRET",
+        "Bearer <abc>?token=SECRET",
+        "user:pw@host?token=SECRET",
+        "'user:pw@host?token=SECRET'",
+    ],
+)
+def test_contextual_queries_never_expose_their_secret(raw: str) -> None:
+    shown = redacted(raw)
+    assert "SECRET" not in shown
+    assert redacted(shown) == shown
+
+
 class TestRedact:
     @pytest.mark.parametrize(
         ("raw", "shown"),
