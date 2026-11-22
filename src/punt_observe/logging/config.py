@@ -8,12 +8,14 @@ import os
 import sys
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from punt_observe._private_fs import PrivatePaths
 from punt_observe.logging.append_log import AtomicAppendLog
 from punt_observe.logging.formatter import RedactingFormatter
 from punt_observe.logging.handler import PrivateFileHandler, RedactingStreamHandler
+
+logger = logging.getLogger(__name__)
 
 
 class Role(StrEnum):
@@ -53,9 +55,22 @@ def configure_logging(
             raise OSError("cannot tighten existing diagnostic files")
     except OSError as exc:
         raise LoggingSetupError("cannot establish private diagnostic sink") from exc
+
+    startup_handlers: dict[str, logging.Handler] = {}
+
+    def make_file_handler(path: Path) -> PrivateFileHandler:
+        handler = PrivateFileHandler(path)
+        startup_handlers["file"] = handler
+        return handler
+
+    def make_stderr_handler(stream: TextIO) -> RedactingStreamHandler:
+        handler = RedactingStreamHandler(stream)
+        startup_handlers["stderr"] = handler
+        return handler
+
     handlers: dict[str, Any] = {
         "file": {
-            "()": PrivateFileHandler,
+            "()": make_file_handler,
             "path": path,
             "level": level,
             "formatter": "standard",
@@ -63,7 +78,7 @@ def configure_logging(
     }
     if sys.stderr is not None:
         handlers["stderr"] = {
-            "()": RedactingStreamHandler,
+            "()": make_stderr_handler,
             "stream": "ext://sys.stderr",
             "level": stderr_level,
             "formatter": "standard",
@@ -96,5 +111,17 @@ def configure_logging(
         )
     )
     logging.lastResort = fallback
-    logging.getLogger(__name__).debug("Configured role=%s pid=%d", role, os.getpid())
+    startup = logger.makeRecord(
+        logger.name,
+        logging.INFO,
+        __file__,
+        0,
+        "Configured %s diagnostics (pid=%d)",
+        (role, os.getpid()),
+        None,
+    )
+    startup_handlers["file"].handle(startup)
+    stderr_handler = startup_handlers.get("stderr")
+    if stderr_handler is not None and startup.levelno >= stderr_handler.level:
+        stderr_handler.handle(startup)
     return path

@@ -15,6 +15,10 @@ uv add 'punt-observe[otlp]'
 
 Each CLI, MCP, hook, daemon and detached worker configures its own role. Libraries
 only create module loggers. No output is written to stdout.
+The package ships no executable and does not configure logging or collect
+usage for itself. Internal telemetry failure warnings use the consumer's
+diagnostic sink, never the telemetry pipeline. The development smoke programs
+stand in for consuming tools and run against isolated home directories.
 
 ```python
 import logging
@@ -29,6 +33,8 @@ Files live at `~/.punt-labs/my-tool/logs/my-tool.log`, UTF-8, INFO by default,
 5 MiB plus five backups. Directories are 0700; files and backups are 0600.
 Rotation is safe across cooperating processes using a stable flock lock.
 Setup permission failures raise `LoggingSetupError`; append failures are best-effort.
+Successful configuration writes an INFO startup record identifying the role and
+process ID, regardless of the file's log level or whether a terminal is attached.
 Final formatted records are redacted, control-escaped and bounded to 64 KiB including
 their newline. Redaction is defense in depth: **never log content or secrets**.
 Home-directory prefixes become `~` on path-component boundaries, including in
@@ -90,6 +96,8 @@ otlp_endpoint="https://collector.example")`. Environment variables
 `PUNT_TELEMETRY_EXPORTER` and `PUNT_TELEMETRY_OTLP_ENDPOINT` may select the
 exporter/endpoint but **cannot grant consent**. Missing optional OTLP dependency
 falls back to SQLite. Instrumentation stays identical.
+Collector failure diagnostics exclude response text and request exception details;
+the library reports dropped export batches through rate-limited diagnostic warnings.
 
 Providers are private, never process-global. Pending span export is bounded at
 2048; saturation drops records, not tool results. Shutdown bounds waiting; a

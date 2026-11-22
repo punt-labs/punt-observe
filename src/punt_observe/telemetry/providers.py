@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from typing import Any, cast
 
@@ -21,9 +21,14 @@ from opentelemetry.sdk.metrics.export import (
     MetricsData,
     PeriodicExportingMetricReader,
 )
+from opentelemetry.sdk.metrics.view import DropAggregation, View
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    SpanExporter,
+    SpanExportResult,
+)
 
 from punt_observe._private_fs import PrivatePaths
 from punt_observe.telemetry import otlp
@@ -31,6 +36,7 @@ from punt_observe.telemetry._diagnostics import warn
 from punt_observe.telemetry._exit import ExitFlush
 from punt_observe.telemetry._fork import register, unregister
 from punt_observe.telemetry._pruning import PeriodicPruner
+from punt_observe.telemetry._sdk import private_meter_options
 from punt_observe.telemetry.config import TelemetryConfig
 from punt_observe.telemetry.sqlite_exporter import (
     SQLiteMetricExporter,
@@ -56,6 +62,27 @@ class _PrivateResource(Resource):
         return self
 
 
+class _GuardedSpanExporter(SpanExporter):
+    """Report network exporter failures without exposing payloads or exceptions."""
+
+    def __init__(self, exporter: SpanExporter) -> None:
+        self._exporter = exporter
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        """Export a batch or report its failure outside the telemetry pipeline."""
+        try:
+            if self._exporter.export(spans) is SpanExportResult.SUCCESS:
+                return SpanExportResult.SUCCESS
+        except Exception:
+            pass
+        warn("span_export_failed")
+        return SpanExportResult.FAILURE
+
+    def shutdown(self) -> None:
+        """Stop the wrapped exporter."""
+        self._exporter.shutdown()
+
+
 class _DeltaMetricExporter(MetricExporter):
     """Request deltas consistently for local, network and injected exporters."""
 
@@ -75,12 +102,18 @@ class _DeltaMetricExporter(MetricExporter):
         **kwargs: Any,
     ) -> MetricExportResult:
         """Forward delta batches with the reader's export deadline."""
-        return cast(
-            MetricExportResult,
-            cast(Any, self._exporter).export(
-                metrics_data, timeout_millis=timeout_millis, **kwargs
-            ),
-        )
+        try:
+            if (
+                cast(Any, self._exporter).export(
+                    metrics_data, timeout_millis=timeout_millis, **kwargs
+                )
+                is MetricExportResult.SUCCESS
+            ):
+                return MetricExportResult.SUCCESS
+        except Exception:
+            pass
+        warn("metric_export_failed")
+        return MetricExportResult.FAILURE
 
     def force_flush(self, timeout_millis: float = 10_000) -> bool:
         """Flush the selected exporter within the provided deadline."""
@@ -120,7 +153,9 @@ class Providers:
                     )(config.otlp_endpoint)
                 except ImportError:
                     warn("otlp_extra_missing")
-            if selected is None:
+            if selected is not None:
+                selected = (_GuardedSpanExporter(selected[0]), selected[1])
+            else:
                 self.store = SQLiteStore(
                     PrivatePaths.root(tool) / "telemetry.db",
                     config.retention_days,
@@ -137,13 +172,18 @@ class Providers:
             metric_cleanup.callback(
                 _cleanup_failed_setup, cast(Any, selected[1]).shutdown
             )
-            self.traces = TracerProvider(resource=resource, shutdown_on_exit=False)
+            self.traces = TracerProvider(
+                resource=resource,
+                shutdown_on_exit=False,
+                **cast(dict[str, Any], private_meter_options(TracerProvider)),
+            )
             self.processor = BatchSpanProcessor(
                 selected[0],
                 max_queue_size=2048,
                 max_export_batch_size=512,
                 schedule_delay_millis=1000,
                 export_timeout_millis=2000,
+                **cast(dict[str, Any], private_meter_options(BatchSpanProcessor)),
             )
             span_cleanup.pop_all()
             span_cleanup.callback(_cleanup_failed_setup, self.processor.shutdown)
@@ -162,6 +202,10 @@ class Providers:
             self.metrics = MeterProvider(
                 resource=resource,
                 metric_readers=[self.reader],
+                views=(
+                    View(instrument_name="*", aggregation=DropAggregation()),
+                    View(instrument_name="*", meter_name="punt_observe"),
+                ),
                 shutdown_on_exit=False,
                 exemplar_filter=AlwaysOffExemplarFilter(),
             )

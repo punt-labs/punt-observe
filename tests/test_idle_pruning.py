@@ -352,7 +352,9 @@ def test_prune_failure_is_rate_limited_private_and_does_not_stop_scheduler(
     try:
         assert recovered.wait(2)
         messages = [
-            r.getMessage() for r in caplog.records if r.name == "punt_observe.telemetry"
+            r.getMessage()
+            for r in caplog.records
+            if r.name == "punt_observe.telemetry._diagnostics"
         ]
         assert messages == ["Telemetry dropped: sqlite_prune_failed"]
         assert "SECRET_CONTENT" not in caplog.text

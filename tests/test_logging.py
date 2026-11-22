@@ -5,16 +5,19 @@ from __future__ import annotations
 import io
 
 # pyright: reportPrivateUsage=false
-import logging
+import logging.config
 import multiprocessing
 import os
 import re
 import stat
+import subprocess
 import sys
 import threading
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.synchronize import Barrier
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -58,7 +61,9 @@ def test_durable_sink_preserves_trailing_prose_punctuation(
     message = "Status (config=?, payload_ok=?)"
     with patch.object(RedactingFormatter, "formatTime", return_value="STAMP"):
         logging.getLogger("test.prose").info(message)
-    assert path.read_text() == f"STAMP [INFO] test.prose: {message}\n"
+    assert path.read_text().splitlines(keepends=True)[-1] == (
+        f"STAMP [INFO] test.prose: {message}\n"
+    )
 
 
 def test_multiprocess_rotation(tmp_path: Path) -> None:
@@ -75,10 +80,22 @@ def test_multiprocess_rotation(tmp_path: Path) -> None:
     assert 2 <= len(logs) <= 6
     assert stat.S_IMODE(directory.stat().st_mode) == 0o700
     seen: set[tuple[int, int]] = set()
+    startups: set[int] = set()
     for path in files:
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
     for path in logs:
         for line in path.read_text().splitlines():
+            startup = re.fullmatch(
+                r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \[INFO\] "
+                r"punt_observe\.logging\.config: Configured worker diagnostics "
+                r"\(pid=(\d+)\)",
+                line,
+            )
+            if startup:
+                pid = int(startup[1])
+                assert pid not in startups
+                startups.add(pid)
+                continue
             match = re.fullmatch(
                 r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \[INFO\] test.writer: "
                 r"writer=(\d) line=(\d+) x{48}",
@@ -89,6 +106,7 @@ def test_multiprocess_rotation(tmp_path: Path) -> None:
             assert key not in seen
             seen.add(key)
     assert seen == {(i, j) for i in range(4) for j in range(25)}
+    assert startups == {process.pid for process in processes}
 
 
 def _capped_record(identity: int, index: int) -> str:
@@ -194,6 +212,35 @@ def test_rotation_failure_returns_without_overfilling(
     assert "[append-log]" in capfd.readouterr().err
 
 
+def test_unsafe_backup_leaves_rotation_slots_unchanged(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "test.log"
+    newest = tmp_path / "test.log.1"
+    oldest = tmp_path / "test.log.2"
+    sink = AtomicAppendLog(path, max_bytes=4, backup_count=2)
+    sink.append("one")
+    sink.append("two")
+    newest.chmod(0o644)
+    assert sink.health()["status"] == "healthy"
+    assert stat.S_IMODE(newest.stat().st_mode) == 0o644
+    oldest.symlink_to(tmp_path / "missing")
+
+    sink.append("new")
+
+    assert sink.health()["status"] == "degraded"
+    assert path.read_text() == "two\n"
+    assert newest.read_text() == "one\n"
+    assert oldest.readlink() == tmp_path / "missing"
+    assert "cannot secure permissions on diagnostic backups" in capfd.readouterr().err
+    oldest.unlink()
+    assert sink.health()["status"] == "healthy"
+    sink.append("new")
+    assert path.read_text() == "new\n"
+    assert newest.read_text() == "two\n"
+    assert oldest.read_text() == "one\n"
+
+
 def test_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -213,6 +260,62 @@ def test_configuration(
         configure_logging("../bad", "cli")
 
 
+@pytest.mark.parametrize("level", ["WARNING", "ERROR", "CRITICAL"])
+def test_startup_record_bypasses_file_threshold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    level: str,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = configure_logging("test", "cli", level=level, stderr_level="INFO")
+    logging.getLogger("test").info("ordinary diagnostic")
+
+    startup = (
+        "[INFO] punt_observe.logging.config: Configured cli diagnostics "
+        f"(pid={os.getpid()})"
+    )
+    assert path.read_text().splitlines()[0].endswith(startup)
+    assert path.read_text().count(startup) == 1
+    assert "ordinary diagnostic" not in path.read_text()
+    assert capsys.readouterr().err.count(startup) == 1
+
+
+def test_concurrent_configurations_keep_their_own_startup_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    first_installed = threading.Event()
+    second_finished = threading.Event()
+    configure = logging.config.dictConfig
+    calling_thread = threading.current_thread()
+
+    def overlap(config: dict[str, Any]) -> None:
+        configure(config)
+        if threading.current_thread() is not calling_thread:
+            first_installed.set()
+            assert second_finished.wait(10)
+
+    with (
+        patch.object(logging.config, "dictConfig", overlap),
+        ThreadPoolExecutor(1) as pool,
+    ):
+        first = pool.submit(configure_logging, "first", "hook")
+        try:
+            assert first_installed.wait(10)
+            second_path = configure_logging("second", "worker")
+        finally:
+            second_finished.set()
+        first_path = first.result(timeout=10)
+
+    first_log = first_path.read_text()
+    second_log = second_path.read_text()
+    assert "Configured hook diagnostics" in first_log
+    assert "Configured worker diagnostics" not in first_log
+    assert "Configured worker diagnostics" in second_log
+    assert "Configured hook diagnostics" not in second_log
+
+
 def test_permissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     directory = tmp_path / ".punt-labs/test/logs"
@@ -227,11 +330,70 @@ def test_permissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(LoggingSetupError):
         configure_logging("test", "cli")
     paths[0].unlink()
+    paths[1].chmod(0o644)
     with (
         patch("os.fchmod", side_effect=PermissionError),
         pytest.raises(LoggingSetupError),
     ):
         configure_logging("test", "cli")
+
+
+def test_worker_startup_survives_discarded_streams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from punt_observe.logging import configure_logging; "
+            "configure_logging('test', 'worker')",
+        ],
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert child.wait(timeout=10) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    path = tmp_path / ".punt-labs/test/logs/test.log"
+    assert (
+        "[INFO] punt_observe.logging.config: Configured worker diagnostics "
+        f"(pid={child.pid})" in path.read_text()
+    )
+
+
+def test_startup_rejects_fifo_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = configure_logging("test", "worker")
+    os.mkfifo(path.with_suffix(".log.1"))
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from punt_observe.logging import configure_logging; "
+            "configure_logging('test', 'worker')",
+        ],
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert child.returncode != 0
+    assert b"LoggingSetupError" in child.stderr
+
+
+def test_direct_append_includes_newline_in_record_cap(tmp_path: Path) -> None:
+    path = tmp_path / "test.log"
+    AtomicAppendLog(path).append("x " * (32 * 1024))
+    record = path.read_bytes()
+    assert len(record) <= 64 * 1024
+    assert record.endswith(b" [truncated]\n")
 
 
 def test_final_redaction_and_cap(tmp_path: Path) -> None:

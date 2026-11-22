@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Self, TypedDict, final
 
 from punt_observe._private_fs import PrivatePaths as PrivateState
+from punt_observe.logging.formatter import bounded
 from punt_observe.logging.redactor import LogRedactor
 from punt_observe.logging.sanitize import SANITIZER
 
@@ -156,11 +157,11 @@ class AtomicAppendLog:
         Control escaping and the atomic write protocol still apply.
         """
         try:
-            line = f"{SANITIZER.escape(text)}\n".encode(errors="backslashreplace")
+            line = (bounded(SANITIZER.escape(text)) + "\n").encode("utf-8")
             self._guard.ensure_private_tree()
             self._append_guarded(line)
-        except OSError as exc:
-            self._to_stderr(f"cannot append to {self._path}: {exc}")
+        except OSError:
+            self._to_stderr("cannot write to the diagnostic file")
 
     def _append_guarded(self, line: bytes) -> None:
         """Append *line* under the rotate lock: shared to write, exclusive to rotate.
@@ -243,33 +244,39 @@ class AtomicAppendLog:
             size = os.fstat(fd).st_size
             if self._max_bytes > 0 and size > 0 and size + len(line) > self._max_bytes:
                 return False
-            if (written := os.write(fd, line)) != len(line):
-                self._to_stderr(
-                    f"short append to {self._path}: {written} of {len(line)} bytes"
-                )
+            if os.write(fd, line) != len(line):
+                self._to_stderr("incomplete write to the diagnostic file")
             return True
         finally:
             os.close(fd)
 
     def is_writable(self) -> bool:
-        """Return whether a line could be appended right now; never raise.
+        """Report whether the active sink and its rotation slots are usable.
 
         Health is a property of the *paths*, not of any one process's last write:
         separate processes append here, so trusting a single writer's success
         would report a peer's state. The append path opens BOTH the rotate lock and
         the log file, so both must be writable-or-creatable -- a log the process can
         append to is still unusable if the lock it must first take cannot be created.
+        Rotation also needs to open existing backups for reading and tightening.
         """
-        return self._can_write(self._path) and self._can_write(self._lock_path)
+        if not (
+            self._can_access(self._path, os.W_OK)
+            and self._can_access(self._lock_path, os.W_OK)
+        ):
+            return False
+        return self._max_bytes <= 0 or all(
+            self._can_access(path, os.R_OK) for path in self._backup_paths()
+        )
 
     @staticmethod
-    def _can_write(path: Path) -> bool:
-        """Return whether *path* is appendable or creatable right now; never raise.
+    def _can_access(path: Path, mode: int) -> bool:
+        """Probe whether a private file can be accessed or created without editing it.
 
         Probes with ``lstat`` so the answer matches the append open's
         ``O_NOFOLLOW``: a symlink at the final component -- live or dangling -- is
         rejected, because the open refuses it and every write would fail even though
-        the link target may look writable. An existing regular file must be writable;
+        the link target may look accessible. Existing files need the requested access;
         a not-yet-created path needs its nearest existing ancestor to grant both
         write and search (``W_OK | X_OK``). Any :class:`OSError` from probing the
         real filesystem is fail-safe (report ``False``) so a health check can never
@@ -282,7 +289,7 @@ class AtomicAppendLog:
             return (
                 stat.S_ISREG(info.st_mode)
                 and info.st_uid == os.getuid()
-                and os.access(path, os.W_OK)
+                and os.access(path, mode)
             )
         except FileNotFoundError:
             return True
@@ -313,50 +320,45 @@ class AtomicAppendLog:
     def tighten_existing(self) -> tuple[Path, ...]:
         """Force the active file, every backup, and the lock to 0600; return failures.
 
-        A startup sweep: a file with 0644 permissions is tightened,
-        and every path it could not force to 0600 is returned so a caller (the
-        daemon config) can WARN about it durably once its handlers exist. Never
-        raises -- a vanished slot is benign; a symlink or a genuine ``chmod`` refusal
-        is a real failure and is reported.
+        A missing slot is benign; an unsafe entry or a permission failure is
+        returned so the caller can surface it without using this sink.
         """
         return tuple(path for path in self._all_files() if not self._tighten_one(path))
 
     def _all_files(self) -> Iterator[Path]:
         """Yield the active file, every possible backup slot, and the rotate lock."""
         yield self._path
+        yield from self._backup_paths()
+        yield self._lock_path
+
+    def _backup_paths(self) -> Iterator[Path]:
+        """Yield each configured backup path, whether it exists or not."""
         for n in range(1, self._backup_count + 1):
             yield self._path.with_name(f"{self._path.name}.{n}")
-        yield self._lock_path
 
     @staticmethod
     def _tighten_one(path: Path) -> bool:
         """Return whether *path* is now a private (0600) regular file; never raise.
 
-        Opens the slot with ``O_NOFOLLOW`` and ``fchmod``s *that fd* -- never the
-        path -- so a ``*.log.N -> victim`` symlink cannot redirect the chmod onto
-        the victim. A vanished slot (``ENOENT``) is benign and reported tightened; a
-        symlink, non-regular entry, or ``EPERM`` is a real failure.
+        Use the private file guard to reject symlinks and foreign owners, and
+        open without blocking on a non-regular entry such as a FIFO.
         """
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            fd = PrivateState(path).open_private(os.O_RDONLY | os.O_NONBLOCK)
         except FileNotFoundError:
             return True
         except OSError:
             return False
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                return False
-            os.fchmod(fd, _LOCK_MODE)
-        except OSError:
-            return False
-        finally:
-            os.close(fd)
+        os.close(fd)
         return True
 
     def _rotate(self) -> bool:
-        """Rename the backup chain, returning False if rotation cannot finish."""
+        """Secure the rotation slots before renaming their private files."""
         if self._backup_count <= 0:
             self._to_stderr("cannot rotate without backup slots")
+            return False
+        if self.tighten_existing():
+            self._to_stderr("cannot secure permissions on diagnostic backups")
             return False
         for n in range(self._backup_count, 0, -1):
             src = (
@@ -368,10 +370,9 @@ class AtomicAppendLog:
             try:
                 if src.exists():
                     src.replace(dst)
-            except OSError as exc:
-                self._to_stderr(f"rotation stalled renaming {src}: {exc}")
+            except OSError:
+                self._to_stderr("cannot rotate the diagnostic file")
                 return False
-        self.tighten_existing()
         return True
 
     @staticmethod
@@ -381,8 +382,4 @@ class AtomicAppendLog:
         if err is None:
             return
         with contextlib.suppress(OSError, ValueError):
-            try:
-                redacted = LogRedactor.settle(message)
-            except Exception:
-                redacted = None
-            err.write(f"[append-log] {redacted or '[diagnostic withheld]'}\n")
+            err.write(f"[append-log] {message}\n")

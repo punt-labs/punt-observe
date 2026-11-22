@@ -4,6 +4,7 @@ from __future__ import annotations
 
 # pyright: reportPrivateUsage=false
 import json
+import logging
 import sqlite3
 import stat
 import threading
@@ -15,12 +16,14 @@ from unittest.mock import patch
 
 import pytest
 from opentelemetry import metrics, trace
+from opentelemetry.metrics import NoOpMeterProvider
 from opentelemetry.sdk.metrics.export import (
     MetricExporter,
     MetricExportResult,
     MetricsData,
 )
 from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from punt_observe.telemetry import (
@@ -36,8 +39,10 @@ from punt_observe.telemetry import (
     SignalSchema,
     SizeAttr,
     TelemetryConfig,
+    _diagnostics,
     open_telemetry,
 )
+from punt_observe.telemetry._sdk import private_meter_options
 from punt_observe.telemetry.config import resolve
 from punt_observe.telemetry.salt import hash_identifier, load_salt
 from punt_observe.telemetry.sqlite_exporter import SQLiteStore
@@ -311,6 +316,98 @@ def test_exporter_swap_and_bounded_shutdown(tmp_path: Path) -> None:
         assert time.monotonic() - started < 0.5
         done.set()
     telemetry._providers.shutdown()
+
+
+@pytest.mark.parametrize("signal", ["span", "metric"])
+@pytest.mark.parametrize("raises", [False, True])
+def test_exporter_failure_diagnostics_are_private_and_rate_limited(
+    signal: str,
+    raises: bool,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_diagnostics, "_last", float("-inf"))
+    caplog.set_level(logging.WARNING)
+    spans = InMemorySpanExporter()
+    metrics_exporter = CapturingMetricExporter()
+    target = spans if signal == "span" else metrics_exporter
+    failure = (
+        SpanExportResult.FAILURE if signal == "span" else MetricExportResult.FAILURE
+    )
+    with patch.object(
+        target,
+        "export",
+        return_value=failure,
+        side_effect=OSError("FORBIDDEN_PROVIDER_CONTENT") if raises else None,
+    ) as export:
+        telemetry = open_telemetry(
+            "test",
+            SCHEMAS,
+            TelemetryConfig(
+                exporter="otlp",
+                otlp_endpoint="https://unused.invalid",
+                otlp_consent=True,
+                exporter_factory=lambda _: (spans, metrics_exporter),
+            ),
+        )
+        try:
+            assert telemetry._providers is not None
+            for _ in range(2):
+                if signal == "span":
+                    telemetry.event("test.cli.used", 1)
+                    assert telemetry._providers.traces.force_flush()
+                else:
+                    telemetry.count("test.cli.calls", 1)
+                    assert telemetry._providers.reader.force_flush()
+            assert export.call_count == 2
+        finally:
+            telemetry.shutdown()
+    assert [record.getMessage() for record in caplog.records] == [
+        f"Telemetry dropped: {signal}_export_failed"
+    ]
+    assert "FORBIDDEN_PROVIDER_CONTENT" not in caplog.text
+
+
+def test_sdk_self_metrics_are_opted_out_without_requiring_new_sdk() -> None:
+    def modern(*, meter_provider: object | None = None) -> object | None:
+        return meter_provider
+
+    def legacy() -> None:
+        pass
+
+    assert isinstance(modern(**private_meter_options(modern)), NoOpMeterProvider)
+    assert private_meter_options(legacy) == {}
+
+
+def test_metric_export_contains_only_facade_meter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED", "true")
+    exporter = CapturingMetricExporter()
+    telemetry = open_telemetry(
+        "test",
+        SCHEMAS,
+        TelemetryConfig(
+            exporter="otlp",
+            otlp_endpoint="https://unused.invalid",
+            otlp_consent=True,
+            exporter_factory=lambda _: (InMemorySpanExporter(), exporter),
+        ),
+    )
+    try:
+        assert telemetry._providers is not None
+        sdk = telemetry._providers.metrics.get_meter("opentelemetry-sdk")
+        sdk.create_counter("otel.test").add(1)
+        telemetry.count("test.cli.calls", 1)
+    finally:
+        telemetry.shutdown()
+    assert {
+        metric.name
+        for batch in exporter.batches
+        for resource in batch.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    } == {"test.cli.calls"}
 
 
 def test_bounded_queue_drops_on_saturation() -> None:

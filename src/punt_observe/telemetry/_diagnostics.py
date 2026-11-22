@@ -7,7 +7,7 @@ import threading
 import time
 from contextlib import suppress
 
-logger = logging.getLogger("punt_observe.telemetry")
+logger = logging.getLogger(__name__)
 _lock = threading.RLock()
 _last = float("-inf")
 
