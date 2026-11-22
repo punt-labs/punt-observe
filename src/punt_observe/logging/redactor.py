@@ -82,7 +82,7 @@ class LogRedactor:
     _USERINFO: ClassVar[re.Pattern[str]] = re.compile(
         r"(?<![^\s/@:'\"<>])[^\s/@:'\"<>]{0,2048}:[^\s/@'\"<>]{0,2048}@"
     )
-    _QUERY: ClassVar[re.Pattern[str]] = re.compile(r"\?(?![!)]$)\S{1,2048}")
+    _QUERY: ClassVar[re.Pattern[str]] = re.compile(r"\?(?![,.;:)\]}!]+$)\S{1,2048}")
     _BEARER_QUERY: ClassVar[re.Pattern[str]] = re.compile(r"(?<=\[bearer\])\?\S+")
     _FRAGMENT: ClassVar[re.Pattern[str]] = re.compile(r"#\S{1,2048}")
     # Detect overlapping "bearer Bearer TOKEN" without joining matches.
@@ -237,11 +237,11 @@ class LogRedactor:
             token = cls._USERINFO.sub("[userinfo]@", token)
         return cls._QUERY.sub("?[query]", token) if "?" in token else token
 
-    @staticmethod
-    def _is_host_query(token: str) -> bool:
+    @classmethod
+    def _is_host_query(cls, token: str) -> bool:
         """Return whether *token* is a bare host (and port) followed by a query."""
-        head, _, query = token.partition("?")
-        return bool(re.match(r"[A-Za-z0-9_%~.\-@=&]", query)) and bool(
+        head, _, _ = token.partition("?")
+        return bool(cls._QUERY.search(token)) and bool(
             AuthorityMask.HOST.fullmatch(head)
         )
 

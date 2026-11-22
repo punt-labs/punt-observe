@@ -15,6 +15,45 @@ from tests.stream_handler import RedactingStreamHandler
 
 
 @pytest.mark.parametrize(
+    "raw",
+    [
+        "Status (config=?, payload_ok=?)",
+        *[
+            f"{prefix}?{tail}"
+            for prefix in ("Status config=", "really")
+            for tail in (",", ".", ";", ":", ")", "]", "}", "!", "),", ".;:)]}!", "")
+        ],
+        "Status (config=?, payload_ok=?),",
+        "Status config=?. payload_ok=?];",
+    ],
+)
+def test_query_redaction_preserves_trailing_prose_punctuation(raw: str) -> None:
+    assert redacted(raw) == raw
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "?a=1,",
+        "x.test?token=SECRET,",
+        '"x.test?token=SECRET,"',
+        "'x.test/p?token=SECRET,'",
+        "user:pw@host?token=SECRET,",
+        'Bearer "abc"?token=SECRET,',
+        "Bearer abc?token=SECRET,",
+        "/path?token=SECRET,",
+        "/path?%74oken=SECRET,",
+        "?%74oken=SECRET,",
+    ],
+)
+def test_trailing_punctuation_does_not_expose_query_values(raw: str) -> None:
+    shown = redacted(raw)
+    assert "SECRET" not in shown
+    assert "a=1" not in shown
+    assert redacted(shown) == shown
+
+
+@pytest.mark.parametrize(
     ("raw", "shown"),
     [
         ("payload_ok=?)", "payload_ok=?)"),
