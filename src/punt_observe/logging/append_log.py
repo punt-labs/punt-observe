@@ -341,9 +341,12 @@ class AtomicAppendLog:
         return True
 
     def _rotate(self) -> bool:
-        """Rename the backup chain, returning False if rotation cannot finish."""
+        """Secure the rotation slots before renaming their private files."""
         if self._backup_count <= 0:
             self._to_stderr("cannot rotate without backup slots")
+            return False
+        if self.tighten_existing():
+            self._to_stderr("cannot secure permissions on diagnostic backups")
             return False
         for n in range(self._backup_count, 0, -1):
             src = (
@@ -358,9 +361,6 @@ class AtomicAppendLog:
             except OSError:
                 self._to_stderr("cannot rotate the diagnostic file")
                 return False
-        if self.tighten_existing():
-            self._to_stderr("cannot secure permissions on diagnostic backups")
-            return False
         return True
 
     @staticmethod

@@ -210,6 +210,30 @@ def test_rotation_failure_returns_without_overfilling(
     assert "[append-log]" in capfd.readouterr().err
 
 
+def test_unsafe_backup_leaves_rotation_slots_unchanged(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "test.log"
+    newest = tmp_path / "test.log.1"
+    oldest = tmp_path / "test.log.2"
+    sink = AtomicAppendLog(path, max_bytes=4, backup_count=2)
+    sink.append("one")
+    sink.append("two")
+    oldest.symlink_to(tmp_path / "missing")
+
+    sink.append("new")
+
+    assert path.read_text() == "two\n"
+    assert newest.read_text() == "one\n"
+    assert oldest.readlink() == tmp_path / "missing"
+    assert "cannot secure permissions on diagnostic backups" in capfd.readouterr().err
+    oldest.unlink()
+    sink.append("new")
+    assert path.read_text() == "new\n"
+    assert newest.read_text() == "two\n"
+    assert oldest.read_text() == "one\n"
+
+
 def test_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -227,6 +251,27 @@ def test_configuration(
         configure_logging("test", "unknown")
     with pytest.raises(ValueError):
         configure_logging("../bad", "cli")
+
+
+@pytest.mark.parametrize("level", ["WARNING", "ERROR", "CRITICAL"])
+def test_startup_record_bypasses_file_threshold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    level: str,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = configure_logging("test", "cli", level=level, stderr_level="INFO")
+    logging.getLogger("test").info("ordinary diagnostic")
+
+    startup = (
+        "[INFO] punt_observe.logging.config: Configured cli diagnostics "
+        f"(pid={os.getpid()})"
+    )
+    assert path.read_text().splitlines()[0].endswith(startup)
+    assert path.read_text().count(startup) == 1
+    assert "ordinary diagnostic" not in path.read_text()
+    assert capsys.readouterr().err.count(startup) == 1
 
 
 def test_permissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

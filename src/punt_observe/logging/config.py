@@ -98,5 +98,19 @@ def configure_logging(
         )
     )
     logging.lastResort = fallback
-    logger.info("Configured %s diagnostics (pid=%d)", role, os.getpid())
+    startup = logger.makeRecord(
+        logger.name,
+        logging.INFO,
+        __file__,
+        0,
+        "Configured %s diagnostics (pid=%d)",
+        (role, os.getpid()),
+        None,
+    )
+    file_handler = logging.getHandlerByName("file")
+    assert file_handler is not None
+    file_handler.handle(startup)
+    stderr_handler = logging.getHandlerByName("stderr")
+    if stderr_handler is not None and startup.levelno >= stderr_handler.level:
+        stderr_handler.handle(startup)
     return path

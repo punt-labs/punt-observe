@@ -34,7 +34,7 @@ Files live at `~/.punt-labs/my-tool/logs/my-tool.log`, UTF-8, INFO by default,
 Rotation is safe across cooperating processes using a stable flock lock.
 Setup permission failures raise `LoggingSetupError`; append failures are best-effort.
 Successful configuration writes an INFO startup record identifying the role and
-process ID, including when the process has no terminal.
+process ID, regardless of the file's log level or whether a terminal is attached.
 Final formatted records are redacted, control-escaped and bounded to 64 KiB including
 their newline. Redaction is defense in depth: **never log content or secrets**.
 Home-directory prefixes become `~` on path-component boundaries, including in
