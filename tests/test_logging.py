@@ -50,6 +50,17 @@ def _writer(home: str, identity: int) -> None:
         )
 
 
+def test_durable_sink_preserves_trailing_prose_punctuation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = configure_logging("test", "hook")
+    message = "Status (config=?, payload_ok=?)"
+    with patch.object(RedactingFormatter, "formatTime", return_value="STAMP"):
+        logging.getLogger("test.prose").info(message)
+    assert path.read_text() == f"STAMP [INFO] test.prose: {message}\n"
+
+
 def test_multiprocess_rotation(tmp_path: Path) -> None:
     ctx = multiprocessing.get_context("spawn")
     processes = [ctx.Process(target=_writer, args=(str(tmp_path), i)) for i in range(4)]
