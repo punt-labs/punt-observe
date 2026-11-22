@@ -15,6 +15,8 @@ from punt_observe.logging.append_log import AtomicAppendLog
 from punt_observe.logging.formatter import RedactingFormatter
 from punt_observe.logging.handler import PrivateFileHandler, RedactingStreamHandler
 
+logger = logging.getLogger(__name__)
+
 
 class Role(StrEnum):
     """Identify a process entry point's diagnostic role."""
@@ -96,5 +98,5 @@ def configure_logging(
         )
     )
     logging.lastResort = fallback
-    logging.getLogger(__name__).debug("Configured role=%s pid=%d", role, os.getpid())
+    logger.info("Configured %s diagnostics (pid=%d)", role, os.getpid())
     return path

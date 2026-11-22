@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Record configured process roles in durable logs and enforce the full 64 KiB
+  record limit on direct appends, including the newline.
+- Reject unsafe backup files at startup without blocking; report rotation
+  permission failures without recursively logging or exposing paths.
+- Keep collector errors and optional OpenTelemetry self-metrics out of
+  consumer diagnostics and telemetry; report dropped batches with rate-limited,
+  metadata-only warnings.
+
 ## [0.1.1] - 2026-11-22
 
 - Preserve surrounding and trailing prose punctuation when redacting URL query

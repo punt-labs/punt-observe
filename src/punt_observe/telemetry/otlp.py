@@ -10,11 +10,14 @@ from opentelemetry.sdk.metrics.export import AggregationTemporality, MetricExpor
 from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation
 from opentelemetry.sdk.trace.export import SpanExporter
 
+from punt_observe.telemetry._sdk import private_meter_options
+
 
 class _PrivateSession:
     def __init__(self) -> None:
         requests = importlib.import_module("requests")
         self._session = requests.Session()
+        self._connection_error = requests.exceptions.ConnectionError
         self._session.trust_env = False
         self.headers: dict[str, str] = {}
 
@@ -28,10 +31,18 @@ class _PrivateSession:
             allow_redirects=False,
             timeout=2 if timeout is None else min(timeout, 2),
         )
-        response = self._session.request(method, url, **kwargs)
+        try:
+            response = self._session.request(method, url, **kwargs)
+        except self._connection_error:
+            raise self._connection_error(
+                "Cannot connect to the telemetry collector"
+            ) from None
+        except Exception:
+            raise RuntimeError("Telemetry collector request failed") from None
         if 300 <= response.status_code < 400:
             response.status_code = 400
-            response.reason = "OTLP redirect refused"
+        if response.status_code >= 400:
+            response.reason = "Telemetry collector rejected the export"
             response._content = b""
         return response
 
@@ -68,6 +79,7 @@ def exporters(endpoint: str) -> tuple[SpanExporter, MetricExporter]:
             traces.OTLPSpanExporter(
                 endpoint=endpoint.rstrip("/") + "/v1/traces",
                 session=_PrivateSession(),
+                **private_meter_options(traces.OTLPSpanExporter),
                 **options,
             ),
         ),
@@ -76,6 +88,7 @@ def exporters(endpoint: str) -> tuple[SpanExporter, MetricExporter]:
             metrics.OTLPMetricExporter(
                 endpoint=endpoint.rstrip("/") + "/v1/metrics",
                 session=_PrivateSession(),
+                **private_meter_options(metrics.OTLPMetricExporter),
                 **options,
                 preferred_temporality={
                     Counter: AggregationTemporality.DELTA,

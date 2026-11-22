@@ -11,7 +11,6 @@ from typing import TextIO
 from punt_observe.logging.append_log import AtomicAppendLog
 from punt_observe.logging.formatter import RedactingFormatter, bounded, withheld
 from punt_observe.logging.redactor import LogRedactor
-from punt_observe.logging.sanitize import escape
 
 
 def _report_failure() -> None:
@@ -63,8 +62,6 @@ class PrivateFileHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         """Write one escaped physical line, including a bounded terminal newline."""
         try:
-            from_text = self.format(record)
-            # Escape first: the expansion must count against the byte budget.
-            self.sink.append_redacted(bounded(escape(from_text)))
+            self.sink.append_redacted(self.format(record))
         except Exception:
             _report_failure()

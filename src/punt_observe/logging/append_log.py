@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Self, TypedDict, final
 
 from punt_observe._private_fs import PrivatePaths as PrivateState
+from punt_observe.logging.formatter import bounded
 from punt_observe.logging.redactor import LogRedactor
 from punt_observe.logging.sanitize import SANITIZER
 
@@ -156,11 +157,11 @@ class AtomicAppendLog:
         Control escaping and the atomic write protocol still apply.
         """
         try:
-            line = f"{SANITIZER.escape(text)}\n".encode(errors="backslashreplace")
+            line = (bounded(SANITIZER.escape(text)) + "\n").encode("utf-8")
             self._guard.ensure_private_tree()
             self._append_guarded(line)
-        except OSError as exc:
-            self._to_stderr(f"cannot append to {self._path}: {exc}")
+        except OSError:
+            self._to_stderr("cannot write to the diagnostic file")
 
     def _append_guarded(self, line: bytes) -> None:
         """Append *line* under the rotate lock: shared to write, exclusive to rotate.
@@ -243,10 +244,8 @@ class AtomicAppendLog:
             size = os.fstat(fd).st_size
             if self._max_bytes > 0 and size > 0 and size + len(line) > self._max_bytes:
                 return False
-            if (written := os.write(fd, line)) != len(line):
-                self._to_stderr(
-                    f"short append to {self._path}: {written} of {len(line)} bytes"
-                )
+            if os.write(fd, line) != len(line):
+                self._to_stderr("incomplete write to the diagnostic file")
             return True
         finally:
             os.close(fd)
@@ -313,11 +312,8 @@ class AtomicAppendLog:
     def tighten_existing(self) -> tuple[Path, ...]:
         """Force the active file, every backup, and the lock to 0600; return failures.
 
-        A startup sweep: a file with 0644 permissions is tightened,
-        and every path it could not force to 0600 is returned so a caller (the
-        daemon config) can WARN about it durably once its handlers exist. Never
-        raises -- a vanished slot is benign; a symlink or a genuine ``chmod`` refusal
-        is a real failure and is reported.
+        A missing slot is benign; an unsafe entry or a permission failure is
+        returned so the caller can surface it without using this sink.
         """
         return tuple(path for path in self._all_files() if not self._tighten_one(path))
 
@@ -332,25 +328,16 @@ class AtomicAppendLog:
     def _tighten_one(path: Path) -> bool:
         """Return whether *path* is now a private (0600) regular file; never raise.
 
-        Opens the slot with ``O_NOFOLLOW`` and ``fchmod``s *that fd* -- never the
-        path -- so a ``*.log.N -> victim`` symlink cannot redirect the chmod onto
-        the victim. A vanished slot (``ENOENT``) is benign and reported tightened; a
-        symlink, non-regular entry, or ``EPERM`` is a real failure.
+        Use the private file guard to reject symlinks and foreign owners, and
+        open without blocking on a non-regular entry such as a FIFO.
         """
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            fd = PrivateState(path).open_private(os.O_RDONLY | os.O_NONBLOCK)
         except FileNotFoundError:
             return True
         except OSError:
             return False
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                return False
-            os.fchmod(fd, _LOCK_MODE)
-        except OSError:
-            return False
-        finally:
-            os.close(fd)
+        os.close(fd)
         return True
 
     def _rotate(self) -> bool:
@@ -368,10 +355,12 @@ class AtomicAppendLog:
             try:
                 if src.exists():
                     src.replace(dst)
-            except OSError as exc:
-                self._to_stderr(f"rotation stalled renaming {src}: {exc}")
+            except OSError:
+                self._to_stderr("cannot rotate the diagnostic file")
                 return False
-        self.tighten_existing()
+        if self.tighten_existing():
+            self._to_stderr("cannot secure permissions on diagnostic backups")
+            return False
         return True
 
     @staticmethod
@@ -381,8 +370,4 @@ class AtomicAppendLog:
         if err is None:
             return
         with contextlib.suppress(OSError, ValueError):
-            try:
-                redacted = LogRedactor.settle(message)
-            except Exception:
-                redacted = None
-            err.write(f"[append-log] {redacted or '[diagnostic withheld]'}\n")
+            err.write(f"[append-log] {message}\n")

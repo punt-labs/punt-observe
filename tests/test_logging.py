@@ -10,6 +10,7 @@ import multiprocessing
 import os
 import re
 import stat
+import subprocess
 import sys
 import threading
 from collections.abc import Iterator
@@ -58,7 +59,9 @@ def test_durable_sink_preserves_trailing_prose_punctuation(
     message = "Status (config=?, payload_ok=?)"
     with patch.object(RedactingFormatter, "formatTime", return_value="STAMP"):
         logging.getLogger("test.prose").info(message)
-    assert path.read_text() == f"STAMP [INFO] test.prose: {message}\n"
+    assert path.read_text().splitlines(keepends=True)[-1] == (
+        f"STAMP [INFO] test.prose: {message}\n"
+    )
 
 
 def test_multiprocess_rotation(tmp_path: Path) -> None:
@@ -75,10 +78,22 @@ def test_multiprocess_rotation(tmp_path: Path) -> None:
     assert 2 <= len(logs) <= 6
     assert stat.S_IMODE(directory.stat().st_mode) == 0o700
     seen: set[tuple[int, int]] = set()
+    startups: set[int] = set()
     for path in files:
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
     for path in logs:
         for line in path.read_text().splitlines():
+            startup = re.fullmatch(
+                r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \[INFO\] "
+                r"punt_observe\.logging\.config: Configured worker diagnostics "
+                r"\(pid=(\d+)\)",
+                line,
+            )
+            if startup:
+                pid = int(startup[1])
+                assert pid not in startups
+                startups.add(pid)
+                continue
             match = re.fullmatch(
                 r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \[INFO\] test.writer: "
                 r"writer=(\d) line=(\d+) x{48}",
@@ -89,6 +104,7 @@ def test_multiprocess_rotation(tmp_path: Path) -> None:
             assert key not in seen
             seen.add(key)
     assert seen == {(i, j) for i in range(4) for j in range(25)}
+    assert startups == {process.pid for process in processes}
 
 
 def _capped_record(identity: int, index: int) -> str:
@@ -227,11 +243,70 @@ def test_permissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(LoggingSetupError):
         configure_logging("test", "cli")
     paths[0].unlink()
+    paths[1].chmod(0o644)
     with (
         patch("os.fchmod", side_effect=PermissionError),
         pytest.raises(LoggingSetupError),
     ):
         configure_logging("test", "cli")
+
+
+def test_worker_startup_survives_discarded_streams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from punt_observe.logging import configure_logging; "
+            "configure_logging('test', 'worker')",
+        ],
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert child.wait(timeout=10) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    path = tmp_path / ".punt-labs/test/logs/test.log"
+    assert (
+        "[INFO] punt_observe.logging.config: Configured worker diagnostics "
+        f"(pid={child.pid})" in path.read_text()
+    )
+
+
+def test_startup_rejects_fifo_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = configure_logging("test", "worker")
+    os.mkfifo(path.with_suffix(".log.1"))
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from punt_observe.logging import configure_logging; "
+            "configure_logging('test', 'worker')",
+        ],
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert child.returncode != 0
+    assert b"LoggingSetupError" in child.stderr
+
+
+def test_direct_append_includes_newline_in_record_cap(tmp_path: Path) -> None:
+    path = tmp_path / "test.log"
+    AtomicAppendLog(path).append("x " * (32 * 1024))
+    record = path.read_bytes()
+    assert len(record) <= 64 * 1024
+    assert record.endswith(b" [truncated]\n")
 
 
 def test_final_redaction_and_cap(tmp_path: Path) -> None:
