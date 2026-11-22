@@ -14,6 +14,30 @@ from tests.redaction import redacted
 from tests.stream_handler import RedactingStreamHandler
 
 
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [
+        ("payload_ok=?)", "payload_ok=?)"),
+        ("really?", "really?"),
+        ("what?!", "what?!"),
+        ("https://x.test/p?token=abc", "https://x.test/…(segments=1)"),
+        ("/path?a=1", "/path?[query]"),
+        ("/path?_token=abc", "/path?[query]"),
+        ("/path?%74oken=abc", "/path?[query]"),
+        ("x.test?token=abc", "x.test?[query]"),
+        ("localhost?token=abc", "localhost?[query]"),
+        ("h:80?token=abc", "h:80?[query]"),
+        ("h?=abc", "h?[query]"),
+        ("h?@abc", "[userinfo]?[query]"),
+        ("Bearer abc?=SECRET", "Bearer [bearer]?[query]"),
+        ("", ""),
+    ],
+)
+def test_query_redaction_preserves_prose_punctuation(raw: str, shown: str) -> None:
+    assert redacted(raw) == shown
+    assert redacted(shown) == shown
+
+
 class TestRedact:
     @pytest.mark.parametrize(
         ("raw", "shown"),
