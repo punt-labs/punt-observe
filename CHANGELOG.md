@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-22
+
+- Preserve surrounding and trailing prose punctuation when redacting URL query
+  values, including values followed by question marks.
 - Add end-to-end regression coverage for home prefixes before raw and escaped
   message controls in formatted diagnostics and atomic appends, preserving longer
   sibling path components.
