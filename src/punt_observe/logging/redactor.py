@@ -82,10 +82,7 @@ class LogRedactor:
     _USERINFO: ClassVar[re.Pattern[str]] = re.compile(
         r"(?<![^\s/@:'\"<>])[^\s/@:'\"<>]{0,2048}:[^\s/@'\"<>]{0,2048}@"
     )
-    _QUERY: ClassVar[re.Pattern[str]] = re.compile(
-        r"^(?P<path>(?=[^?\s]{0,2048}/)[^?\s]{1,2048})"
-        r"\?[A-Za-z0-9_%~.\-]\S{0,2047}"
-    )
+    _QUERY: ClassVar[re.Pattern[str]] = re.compile(r"\?(?![!)]$)\S{1,2048}")
     _BEARER_QUERY: ClassVar[re.Pattern[str]] = re.compile(r"(?<=\[bearer\])\?\S+")
     _FRAGMENT: ClassVar[re.Pattern[str]] = re.compile(r"#\S{1,2048}")
     # Detect overlapping "bearer Bearer TOKEN" without joining matches.
@@ -238,7 +235,7 @@ class LogRedactor:
         # A password may hold "?" and "#", so userinfo goes before the query.
         if "@" in token:
             token = cls._USERINFO.sub("[userinfo]@", token)
-        return cls._QUERY.sub(r"\g<path>?[query]", token) if "?" in token else token
+        return cls._QUERY.sub("?[query]", token) if "?" in token else token
 
     @staticmethod
     def _is_host_query(token: str) -> bool:

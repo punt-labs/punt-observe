@@ -44,6 +44,26 @@ def test_oversized_bearer_query_masks_its_entire_suffix(size: int) -> None:
     assert redacted(raw) == "Bearer [bearer]?[query] end"
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "x.test?token=SECRET",
+        '"x.test?token=SECRET"',
+        "'x.test/p?token=SECRET'",
+        'Bearer "abc"?token=SECRET',
+        "Bearer 'abc'?token=SECRET",
+        "Bearer `abc`?token=SECRET",
+        "Bearer <abc>?token=SECRET",
+        "user:pw@host?token=SECRET",
+        "'user:pw@host?token=SECRET'",
+    ],
+)
+def test_contextual_queries_never_expose_their_secret(raw: str) -> None:
+    shown = redacted(raw)
+    assert "SECRET" not in shown
+    assert redacted(shown) == shown
+
+
 class TestRedact:
     @pytest.mark.parametrize(
         ("raw", "shown"),
