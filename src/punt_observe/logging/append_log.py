@@ -251,24 +251,32 @@ class AtomicAppendLog:
             os.close(fd)
 
     def is_writable(self) -> bool:
-        """Return whether a line could be appended right now; never raise.
+        """Report whether the active sink and its rotation slots are usable.
 
         Health is a property of the *paths*, not of any one process's last write:
         separate processes append here, so trusting a single writer's success
         would report a peer's state. The append path opens BOTH the rotate lock and
         the log file, so both must be writable-or-creatable -- a log the process can
         append to is still unusable if the lock it must first take cannot be created.
+        Rotation also needs to open existing backups for reading and tightening.
         """
-        return self._can_write(self._path) and self._can_write(self._lock_path)
+        if not (
+            self._can_access(self._path, os.W_OK)
+            and self._can_access(self._lock_path, os.W_OK)
+        ):
+            return False
+        return self._max_bytes <= 0 or all(
+            self._can_access(path, os.R_OK) for path in self._backup_paths()
+        )
 
     @staticmethod
-    def _can_write(path: Path) -> bool:
-        """Return whether *path* is appendable or creatable right now; never raise.
+    def _can_access(path: Path, mode: int) -> bool:
+        """Probe whether a private file can be accessed or created without editing it.
 
         Probes with ``lstat`` so the answer matches the append open's
         ``O_NOFOLLOW``: a symlink at the final component -- live or dangling -- is
         rejected, because the open refuses it and every write would fail even though
-        the link target may look writable. An existing regular file must be writable;
+        the link target may look accessible. Existing files need the requested access;
         a not-yet-created path needs its nearest existing ancestor to grant both
         write and search (``W_OK | X_OK``). Any :class:`OSError` from probing the
         real filesystem is fail-safe (report ``False``) so a health check can never
@@ -281,7 +289,7 @@ class AtomicAppendLog:
             return (
                 stat.S_ISREG(info.st_mode)
                 and info.st_uid == os.getuid()
-                and os.access(path, os.W_OK)
+                and os.access(path, mode)
             )
         except FileNotFoundError:
             return True
@@ -320,9 +328,13 @@ class AtomicAppendLog:
     def _all_files(self) -> Iterator[Path]:
         """Yield the active file, every possible backup slot, and the rotate lock."""
         yield self._path
+        yield from self._backup_paths()
+        yield self._lock_path
+
+    def _backup_paths(self) -> Iterator[Path]:
+        """Yield each configured backup path, whether it exists or not."""
         for n in range(1, self._backup_count + 1):
             yield self._path.with_name(f"{self._path.name}.{n}")
-        yield self._lock_path
 
     @staticmethod
     def _tighten_one(path: Path) -> bool:

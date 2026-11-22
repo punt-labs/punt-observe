@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 
 # pyright: reportPrivateUsage=false
-import logging
+import logging.config
 import multiprocessing
 import os
 import re
@@ -14,8 +14,10 @@ import subprocess
 import sys
 import threading
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.synchronize import Barrier
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -219,15 +221,20 @@ def test_unsafe_backup_leaves_rotation_slots_unchanged(
     sink = AtomicAppendLog(path, max_bytes=4, backup_count=2)
     sink.append("one")
     sink.append("two")
+    newest.chmod(0o644)
+    assert sink.health()["status"] == "healthy"
+    assert stat.S_IMODE(newest.stat().st_mode) == 0o644
     oldest.symlink_to(tmp_path / "missing")
 
     sink.append("new")
 
+    assert sink.health()["status"] == "degraded"
     assert path.read_text() == "two\n"
     assert newest.read_text() == "one\n"
     assert oldest.readlink() == tmp_path / "missing"
     assert "cannot secure permissions on diagnostic backups" in capfd.readouterr().err
     oldest.unlink()
+    assert sink.health()["status"] == "healthy"
     sink.append("new")
     assert path.read_text() == "new\n"
     assert newest.read_text() == "two\n"
@@ -272,6 +279,41 @@ def test_startup_record_bypasses_file_threshold(
     assert path.read_text().count(startup) == 1
     assert "ordinary diagnostic" not in path.read_text()
     assert capsys.readouterr().err.count(startup) == 1
+
+
+def test_concurrent_configurations_keep_their_own_startup_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    first_installed = threading.Event()
+    second_finished = threading.Event()
+    configure = logging.config.dictConfig
+    calling_thread = threading.current_thread()
+
+    def overlap(config: dict[str, Any]) -> None:
+        configure(config)
+        if threading.current_thread() is not calling_thread:
+            first_installed.set()
+            assert second_finished.wait(10)
+
+    with (
+        patch.object(logging.config, "dictConfig", overlap),
+        ThreadPoolExecutor(1) as pool,
+    ):
+        first = pool.submit(configure_logging, "first", "hook")
+        try:
+            assert first_installed.wait(10)
+            second_path = configure_logging("second", "worker")
+        finally:
+            second_finished.set()
+        first_path = first.result(timeout=10)
+
+    first_log = first_path.read_text()
+    second_log = second_path.read_text()
+    assert "Configured hook diagnostics" in first_log
+    assert "Configured worker diagnostics" not in first_log
+    assert "Configured worker diagnostics" in second_log
+    assert "Configured hook diagnostics" not in second_log
 
 
 def test_permissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
